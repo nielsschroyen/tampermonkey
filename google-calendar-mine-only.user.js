@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Google Calendar - Mine Only / Restore
 // @namespace    local.gcal.mine-only
-// @version      1.4.0
+// @version      1.6.0
 // @description  Toggle your own calendars, restore visibility, and dim events from other calendars.
 // @match        https://calendar.google.com/*
 // @grant        none
@@ -16,7 +16,7 @@
 (() => {
     'use strict';
 
-    const STORAGE_KEY_PRIMARY = 'gcalMineOnly.primaryCalendars';
+    const STORAGE_KEY_PRIMARY = 'gcalMineOnly.primaryCalendarIds';
     const STORAGE_KEY_STATE = 'gcalMineOnly.previousState';
 
     const BUTTON_ID = 'gcal-mine-only-toggle';
@@ -24,6 +24,7 @@
 
     const DIM_CLASS = 'gcal-mine-only-dimmed';
     const DIM_STYLE_ID = 'gcal-mine-only-dim-style';
+
     const DIM_OPACITY = 0.5;
 
     let mineOnlyActive = false;
@@ -34,16 +35,46 @@
     const sleep = ms =>
         new Promise(resolve => setTimeout(resolve, ms));
 
-    function cleanCalendarName(name) {
-        return (name || '')
-            .replace(/\s+/g, ' ')
-            .replace(/^show\s+/i, '')
-            .replace(/^hide\s+/i, '')
-            .replace(/^toggle\s+/i, '')
-            .replace(/^calendar[:\s-]*/i, '')
-            .replace(/\s+calendar$/i, '')
-            .trim();
+    /* -------------------------------------------------------
+     * BASE64
+     * ----------------------------------------------------- */
+
+    function decodeBase64(value) {
+        if (!value) {
+            return null;
+        }
+
+        try {
+            let normalized = value
+                .replace(/-/g, '+')
+                .replace(/_/g, '/');
+
+            while (normalized.length % 4 !== 0) {
+                normalized += '=';
+            }
+
+            const binary = atob(normalized);
+
+            const bytes = Uint8Array.from(
+                binary,
+                char => char.charCodeAt(0)
+            );
+
+            return new TextDecoder().decode(bytes);
+        } catch (error) {
+            console.warn(
+                '[GCal Mine Only] Could not decode Base64:',
+                value,
+                error
+            );
+
+            return null;
+        }
     }
+
+    /* -------------------------------------------------------
+     * CALENDAR DETECTION
+     * ----------------------------------------------------- */
 
     function isVisible(element) {
         const rect = element.getBoundingClientRect();
@@ -56,241 +87,63 @@
         );
     }
 
-    function getCheckedState(element) {
-        if (
-            element instanceof HTMLInputElement &&
-            element.type === 'checkbox'
-        ) {
-            return element.checked;
-        }
-
-        const ariaChecked =
-            element.getAttribute('aria-checked');
-
-        if (ariaChecked === 'true') return true;
-        if (ariaChecked === 'false') return false;
-
-        return null;
-    }
-
-    function looksLikeDateControl(text) {
-        if (!text) return false;
-
-        const patterns = [
-            /^\d{1,2}\s*,\s*\p{L}+/iu,
-            /^\d{1,2}\s+\p{L}+\s*,\s*\p{L}+/iu,
-            /^\d{1,2}\s+\p{L}+\s+\d{4}$/iu,
-            /^\p{L}+\s+\d{1,2}(?:,\s*\d{4})?$/iu
-        ];
-
-        return patterns.some(
-            pattern => pattern.test(text)
-        );
-    }
-
-    function looksLikeUiControl(text) {
-        if (!text) return true;
-
-        const rejected = new Set([
-            'create',
-            'maken',
-            'today',
-            'vandaag',
-            'previous',
-            'vorige',
-            'next',
-            'volgende',
-            'search',
-            'zoeken',
-            'settings',
-            'instellingen',
-            'support',
-            'main menu',
-            'hoofdmenu',
-            'google apps',
-            'account',
-            'month',
-            'maand',
-            'week',
-            'day',
-            'dag',
-            'year',
-            'jaar',
-            'schedule',
-            'planning',
-            'tasks',
-            'taken',
-            'keep',
-            'contacts',
-            'contacten',
-            'my calendars',
-            "mijn agenda's",
-            'other calendars',
-            "andere agenda's"
-        ]);
-
-        return rejected.has(
-            text.toLowerCase()
-        );
-    }
-
-    function getCalendarName(element) {
-        const directCandidates = [
-            element.getAttribute('aria-label'),
-            element.getAttribute('data-tooltip'),
-            element.getAttribute('title')
-        ];
-
-        for (const candidate of directCandidates) {
-            const name =
-                cleanCalendarName(candidate);
-
-            if (
-                name &&
-                name.length <= 120 &&
-                !looksLikeDateControl(name) &&
-                !looksLikeUiControl(name)
-            ) {
-                return name;
-            }
-        }
-
-        let node = element.parentElement;
-
-        for (
-            let depth = 0;
-            depth < 3 && node;
-            depth++, node = node.parentElement
-        ) {
-            const lines =
-                (node.innerText || '')
-                    .split('\n')
-                    .map(
-                        line =>
-                            cleanCalendarName(line)
-                    )
-                    .filter(Boolean);
-
-            if (lines.length > 4) {
-                break;
-            }
-
-            const candidates = lines
-                .filter(
-                    line => line.length <= 120
-                )
-                .filter(
-                    line =>
-                        !looksLikeDateControl(line)
-                )
-                .filter(
-                    line =>
-                        !looksLikeUiControl(line)
-                )
-                .sort(
-                    (a, b) =>
-                        b.length - a.length
-                );
-
-            if (candidates.length > 0) {
-                return candidates[0];
-            }
-        }
-
-        return null;
-    }
-
-    function findToggleCandidates() {
-        const selector = [
-            '[role="checkbox"][aria-checked]',
-            '[role="switch"][aria-checked]',
-            'input[type="checkbox"]',
-            '[aria-checked="true"]',
-            '[aria-checked="false"]'
-        ].join(',');
-
+    function getCalendarCheckboxes() {
+        /*
+         * This is the actual Google Calendar checkbox markup
+         * observed in the current UI.
+         */
         return [
             ...document.querySelectorAll(
-                selector
+                'input[type="checkbox"][jsname="YPqjbf"]'
             )
-        ]
-            .filter(isVisible)
-            .filter(element => {
-                const rect =
-                    element.getBoundingClientRect();
+        ].filter(element => {
+            if (!isVisible(element)) {
+                return false;
+            }
 
-                if (
-                    rect.left > 450 ||
-                    rect.top < 260
-                ) {
-                    return false;
-                }
+            const row = element.closest('[data-id]');
 
-                if (
-                    getCheckedState(element) ===
-                    null
-                ) {
-                    return false;
-                }
-
-                const name =
-                    getCalendarName(element);
-
-                return (
-                    Boolean(name) &&
-                    !looksLikeDateControl(name) &&
-                    !looksLikeUiControl(name)
-                );
-            });
-    }
-
-    function getCalendarToggles() {
-        const candidates =
-            findToggleCandidates();
-
-        const occurrenceCounter =
-            new Map();
-
-        return candidates.map(element => {
-            const name =
-                getCalendarName(element);
-
-            const occurrence =
-                (occurrenceCounter.get(name) ||
-                    0) + 1;
-
-            occurrenceCounter.set(
-                name,
-                occurrence
-            );
-
-            return {
-                id: JSON.stringify([
-                    name,
-                    occurrence
-                ]),
-                name,
-                occurrence,
-                element,
-                checked:
-                    getCheckedState(element)
-            };
+            return Boolean(row);
         });
     }
 
-    function getDisplayName(
-        calendar,
-        calendars
-    ) {
-        const sameNameCount =
-            calendars.filter(
-                item =>
-                    item.name === calendar.name
-            ).length;
+    function getCalendarInfo(checkbox) {
+        const row = checkbox.closest('[data-id]');
 
-        return sameNameCount > 1
-            ? `${calendar.name} [${calendar.occurrence}]`
-            : calendar.name;
+        if (!row) {
+            return null;
+        }
+
+        const encodedId =
+            row.getAttribute('data-id');
+
+        const calendarId =
+            decodeBase64(encodedId);
+
+        const name =
+            checkbox.getAttribute('aria-label') ||
+            row.innerText?.trim() ||
+            calendarId ||
+            'Unnamed calendar';
+
+        if (!calendarId) {
+            return null;
+        }
+
+        return {
+            id: calendarId,
+            encodedId,
+            name,
+            checkbox,
+            row,
+            checked: checkbox.checked
+        };
+    }
+
+    function getCalendars() {
+        return getCalendarCheckboxes()
+            .map(getCalendarInfo)
+            .filter(Boolean);
     }
 
     async function waitForCalendars(
@@ -302,7 +155,7 @@
             Date.now() - started < timeout
         ) {
             const calendars =
-                getCalendarToggles();
+                getCalendars();
 
             if (calendars.length > 0) {
                 return calendars;
@@ -314,68 +167,112 @@
         return [];
     }
 
-    async function clickToggle(
+    async function setCalendarVisibility(
         calendar,
         targetState
     ) {
-        const currentState =
-            getCheckedState(calendar.element);
-
-        if (currentState === targetState) {
+        if (
+            calendar.checkbox.checked ===
+            targetState
+        ) {
             return;
         }
 
-        calendar.element.dispatchEvent(
-            new MouseEvent('click', {
-                bubbles: true,
-                cancelable: true,
-                view: window
-            })
-        );
+        calendar.checkbox.click();
 
         await sleep(180);
     }
 
-    function loadPrimaryCalendars() {
-        const saved =
+    /* -------------------------------------------------------
+     * PRIMARY / "MINE" CALENDARS
+     * ----------------------------------------------------- */
+
+    function loadPrimaryCalendarIds() {
+        const raw =
             localStorage.getItem(
                 STORAGE_KEY_PRIMARY
             );
 
-        if (!saved) {
+        if (!raw) {
             return null;
         }
 
         try {
-            const value =
-                JSON.parse(saved);
+            const parsed = JSON.parse(raw);
 
-            return Array.isArray(value)
-                ? value
-                : null;
+            if (!Array.isArray(parsed)) {
+                return null;
+            }
+
+            return parsed;
         } catch {
             return null;
         }
     }
 
+    function savePrimaryCalendarIds(ids) {
+        localStorage.setItem(
+            STORAGE_KEY_PRIMARY,
+            JSON.stringify(ids)
+        );
+    }
+
     async function choosePrimaryCalendars(
         calendars
     ) {
-        const numbered =
-            calendars
-                .map(
-                    (calendar, index) =>
-                        `${index + 1}. ${getDisplayName(
-                            calendar,
-                            calendars
-                        )}`
-                )
-                .join('\n');
+        const duplicateCounts = new Map();
+
+        for (const calendar of calendars) {
+            duplicateCounts.set(
+                calendar.name,
+                (
+                    duplicateCounts.get(
+                        calendar.name
+                    ) || 0
+                ) + 1
+            );
+        }
+
+        const occurrences = new Map();
+
+        const numbered = calendars
+            .map((calendar, index) => {
+                const occurrence =
+                    (
+                        occurrences.get(
+                            calendar.name
+                        ) || 0
+                    ) + 1;
+
+                occurrences.set(
+                    calendar.name,
+                    occurrence
+                );
+
+                let displayName =
+                    calendar.name;
+
+                if (
+                    duplicateCounts.get(
+                        calendar.name
+                    ) > 1
+                ) {
+                    displayName +=
+                        ` [${occurrence}]`;
+                }
+
+                return (
+                    `${index + 1}. ` +
+                    displayName
+                );
+            })
+            .join('\n');
 
         const answer = prompt(
             'Which calendars are yours?\n\n' +
             numbered +
-            '\n\nEnter one or more numbers separated by commas.\n' +
+            '\n\n' +
+            'Enter one or more numbers separated by commas.\n' +
             'Example: 1,2,5'
         );
 
@@ -397,7 +294,7 @@
             )
         ];
 
-        if (
+        const invalid =
             indexes.length === 0 ||
             indexes.some(
                 index =>
@@ -405,41 +302,42 @@
                     index < 0 ||
                     index >=
                         calendars.length
-            )
-        ) {
+            );
+
+        if (invalid) {
             alert(
                 'Invalid selection.\n\n' +
-                'Enter calendar numbers separated by commas, ' +
-                'for example: 1,2,5'
+                'Enter calendar numbers separated by commas.\n\n' +
+                'Example: 1,2,5'
             );
 
             return null;
         }
 
-        const selectedIds =
-            indexes.map(
-                index =>
-                    calendars[index].id
-            );
-
-        localStorage.setItem(
-            STORAGE_KEY_PRIMARY,
-            JSON.stringify(selectedIds)
+        const ids = indexes.map(
+            index => calendars[index].id
         );
 
-        return selectedIds;
+        savePrimaryCalendarIds(ids);
+
+        return ids;
     }
 
-    async function ensurePrimaryCalendars(
+    async function ensurePrimaryCalendarIds(
         calendars
     ) {
-        let primaryIds =
-            loadPrimaryCalendars();
+        let ids =
+            loadPrimaryCalendarIds();
 
+        /*
+         * Previous script versions stored a different identifier
+         * format. If it does not match the real decoded calendar IDs,
+         * automatically run setup again.
+         */
         if (
-            !primaryIds ||
-            primaryIds.length === 0 ||
-            primaryIds.some(
+            !ids ||
+            ids.length === 0 ||
+            ids.some(
                 id =>
                     !calendars.some(
                         calendar =>
@@ -447,14 +345,40 @@
                     )
             )
         ) {
-            primaryIds =
+            ids =
                 await choosePrimaryCalendars(
                     calendars
                 );
         }
 
-        return primaryIds;
+        return ids;
     }
+
+    function resetPrimaryCalendars() {
+        localStorage.removeItem(
+            STORAGE_KEY_PRIMARY
+        );
+
+        localStorage.removeItem(
+            STORAGE_KEY_STATE
+        );
+
+        clearDimmedEvents();
+
+        mineOnlyActive = false;
+        dimOthersActive = false;
+
+        updateButtons();
+
+        alert(
+            'Your selected calendars have been reset.\n\n' +
+            'Click "Mine only" or "Dim others" to choose them again.'
+        );
+    }
+
+    /* -------------------------------------------------------
+     * MINE ONLY
+     * ----------------------------------------------------- */
 
     async function activateMineOnly() {
         const calendars =
@@ -466,7 +390,7 @@
         }
 
         const primaryIds =
-            await ensurePrimaryCalendars(
+            await ensurePrimaryCalendarIds(
                 calendars
             );
 
@@ -478,9 +402,7 @@
             calendars.map(calendar => ({
                 id: calendar.id,
                 checked:
-                    getCheckedState(
-                        calendar.element
-                    )
+                    calendar.checkbox.checked
             }));
 
         localStorage.setItem(
@@ -492,19 +414,23 @@
             const savedCalendar
             of previousState
         ) {
-            const currentCalendar =
-                getCalendarToggles().find(
+            /*
+             * Re-read because Google can rebuild the sidebar
+             * after every checkbox change.
+             */
+            const current =
+                getCalendars().find(
                     calendar =>
                         calendar.id ===
                         savedCalendar.id
                 );
 
-            if (!currentCalendar) {
+            if (!current) {
                 continue;
             }
 
-            await clickToggle(
-                currentCalendar,
+            await setCalendarVisibility(
+                current,
                 primaryIds.includes(
                     savedCalendar.id
                 )
@@ -512,19 +438,21 @@
         }
 
         mineOnlyActive = true;
+
         updateButtons();
     }
 
-    async function restorePreviousState() {
-        const saved =
+    async function restoreCalendars() {
+        const raw =
             localStorage.getItem(
                 STORAGE_KEY_STATE
             );
 
-        if (!saved) {
+        if (!raw) {
             alert(
-                'No previous calendar state has been saved yet.'
+                'No previous calendar state has been saved.'
             );
+
             return;
         }
 
@@ -532,19 +460,12 @@
 
         try {
             previousState =
-                JSON.parse(saved);
+                JSON.parse(raw);
         } catch {
             alert(
                 'The saved calendar state is invalid.'
             );
-            return;
-        }
 
-        const calendars =
-            await waitForCalendars();
-
-        if (!calendars.length) {
-            showDetectionError();
             return;
         }
 
@@ -552,19 +473,19 @@
             const savedCalendar
             of previousState
         ) {
-            const currentCalendar =
-                getCalendarToggles().find(
+            const current =
+                getCalendars().find(
                     calendar =>
                         calendar.id ===
                         savedCalendar.id
                 );
 
-            if (!currentCalendar) {
+            if (!current) {
                 continue;
             }
 
-            await clickToggle(
-                currentCalendar,
+            await setCalendarVisibility(
+                current,
                 Boolean(
                     savedCalendar.checked
                 )
@@ -572,29 +493,63 @@
         }
 
         mineOnlyActive = false;
-        updateButtons();
-    }
-
-    function resetPrimaryCalendars() {
-        localStorage.removeItem(
-            STORAGE_KEY_PRIMARY
-        );
-
-        mineOnlyActive = false;
-        dimOthersActive = false;
-
-        clearDimmedEvents();
-
-        alert(
-            'Your calendar selection has been reset.\n\n' +
-            'Click "Mine only" or "Dim others" to choose your calendars again.'
-        );
 
         updateButtons();
     }
 
     /* -------------------------------------------------------
-     * DIM OTHER CALENDARS
+     * EVENT DETECTION
+     * ----------------------------------------------------- */
+
+    function getEventElements() {
+        /*
+         * This is the important discovery from the current
+         * Google Calendar DOM:
+         *
+         *     <div data-eventid="...">
+         */
+        return [
+            ...document.querySelectorAll(
+                '[data-eventid]'
+            )
+        ].filter(isVisible);
+    }
+
+    function getEventCalendarId(
+        eventElement
+    ) {
+        const encoded =
+            eventElement.getAttribute(
+                'data-eventid'
+            );
+
+        const decoded =
+            decodeBase64(encoded);
+
+        if (!decoded) {
+            return null;
+        }
+
+        /*
+         * Observed Google format:
+         *
+         * <event-id>_<date/time> calendar@example.com
+         *
+         * The calendar identifier is the final whitespace-separated
+         * value.
+         */
+        const match =
+            decoded.match(/\s(\S+)\s*$/);
+
+        if (!match) {
+            return null;
+        }
+
+        return match[1];
+    }
+
+    /* -------------------------------------------------------
+     * DIM OTHERS
      * ----------------------------------------------------- */
 
     function ensureDimStyle() {
@@ -607,252 +562,19 @@
         }
 
         const style =
-            document.createElement('style');
+            document.createElement(
+                'style'
+            );
 
         style.id = DIM_STYLE_ID;
 
-        style.textContent =
-            `.${DIM_CLASS} { ` +
-            `opacity: ${DIM_OPACITY} !important; ` +
-            `}`;
+        style.textContent = `
+            .${DIM_CLASS} {
+                opacity: ${DIM_OPACITY} !important;
+            }
+        `;
 
         document.head.appendChild(style);
-    }
-
-    function normalizeColor(color) {
-        if (!color) {
-            return null;
-        }
-
-        const value =
-            color.trim().toLowerCase();
-
-        if (
-            value === 'transparent' ||
-            value ===
-                'rgba(0, 0, 0, 0)' ||
-            value ===
-                'rgb(255, 255, 255)' ||
-            value ===
-                'rgb(0, 0, 0)'
-        ) {
-            return null;
-        }
-
-        return value;
-    }
-
-    function getCalendarColorCandidates(
-        calendar
-    ) {
-        const colors = new Set();
-
-        let node = calendar.element;
-
-        for (
-            let depth = 0;
-            depth < 4 && node;
-            depth++, node = node.parentElement
-        ) {
-            const descendants = [
-                node,
-                ...node.querySelectorAll('*')
-            ];
-
-            for (
-                const element
-                of descendants.slice(0, 40)
-            ) {
-                const style =
-                    getComputedStyle(element);
-
-                const candidates = [
-                    style.backgroundColor,
-                    style.borderColor,
-                    style.color
-                ];
-
-                for (
-                    const color
-                    of candidates
-                ) {
-                    const normalized =
-                        normalizeColor(color);
-
-                    if (normalized) {
-                        colors.add(
-                            normalized
-                        );
-                    }
-                }
-            }
-        }
-
-        return colors;
-    }
-
-    function getEventColorCandidates(
-        element
-    ) {
-        const colors = new Set();
-
-        let node = element;
-
-        for (
-            let depth = 0;
-            depth < 3 && node;
-            depth++, node = node.parentElement
-        ) {
-            const style =
-                getComputedStyle(node);
-
-            const candidates = [
-                style.backgroundColor,
-                style.borderColor,
-                style.borderLeftColor,
-                style.borderTopColor,
-                style.color
-            ];
-
-            for (
-                const color
-                of candidates
-            ) {
-                const normalized =
-                    normalizeColor(color);
-
-                if (normalized) {
-                    colors.add(normalized);
-                }
-            }
-        }
-
-        return colors;
-    }
-
-    function getEventCandidates() {
-        const selector = [
-            '[data-eventid]',
-            '[data-event-id]',
-            '[data-eventchip]',
-            '[role="button"][aria-label]'
-        ].join(',');
-
-        const seen = new Set();
-        const result = [];
-
-        for (
-            const element
-            of document.querySelectorAll(
-                selector
-            )
-        ) {
-            if (!isVisible(element)) {
-                continue;
-            }
-
-            const rect =
-                element.getBoundingClientRect();
-
-            /*
-             * Ignore Google's sidebar and top toolbar.
-             */
-            if (
-                rect.left < 220 ||
-                rect.top < 70
-            ) {
-                continue;
-            }
-
-            if (
-                rect.width < 12 ||
-                rect.height < 8
-            ) {
-                continue;
-            }
-
-            const text = [
-                element.getAttribute(
-                    'aria-label'
-                ),
-                element.getAttribute(
-                    'title'
-                ),
-                element.getAttribute(
-                    'data-tooltip'
-                ),
-                element.innerText
-            ]
-                .filter(Boolean)
-                .join(' ');
-
-            if (!text.trim()) {
-                continue;
-            }
-
-            if (seen.has(element)) {
-                continue;
-            }
-
-            seen.add(element);
-            result.push(element);
-        }
-
-        return result;
-    }
-
-    function eventLooksMine(
-        eventElement,
-        mineNames,
-        mineColors
-    ) {
-        const searchableText = [
-            eventElement.getAttribute(
-                'aria-label'
-            ),
-            eventElement.getAttribute(
-                'title'
-            ),
-            eventElement.getAttribute(
-                'data-tooltip'
-            ),
-            eventElement.innerText
-        ]
-            .filter(Boolean)
-            .join(' ')
-            .toLowerCase();
-
-        /*
-         * First try calendar-name information exposed
-         * by Google in accessibility metadata.
-         */
-        for (const name of mineNames) {
-            if (
-                name &&
-                searchableText.includes(
-                    name.toLowerCase()
-                )
-            ) {
-                return true;
-            }
-        }
-
-        /*
-         * Fallback: compare the visible event color
-         * against colors from your selected calendars.
-         */
-        const eventColors =
-            getEventColorCandidates(
-                eventElement
-            );
-
-        for (const color of eventColors) {
-            if (mineColors.has(color)) {
-                return true;
-            }
-        }
-
-        return false;
     }
 
     function clearDimmedEvents() {
@@ -877,7 +599,7 @@
         }
 
         const primaryIds =
-            await ensurePrimaryCalendars(
+            await ensurePrimaryCalendarIds(
                 calendars
             );
 
@@ -888,78 +610,60 @@
         ensureDimStyle();
         clearDimmedEvents();
 
-        const mineCalendars =
-            calendars.filter(
-                calendar =>
-                    primaryIds.includes(
-                        calendar.id
-                    )
-            );
+        const events =
+            getEventElements();
 
-        const mineNames = [
-            ...new Set(
-                mineCalendars.map(
-                    calendar =>
-                        calendar.name
-                )
-            )
-        ];
-
-        const mineColors = new Set();
-
-        for (
-            const calendar
-            of mineCalendars
-        ) {
-            for (
-                const color
-                of getCalendarColorCandidates(
-                    calendar
-                )
-            ) {
-                mineColors.add(color);
-            }
-        }
+        let identified = 0;
+        let dimmed = 0;
+        let mine = 0;
 
         for (
             const eventElement
-            of getEventCandidates()
+            of events
         ) {
+            const calendarId =
+                getEventCalendarId(
+                    eventElement
+                );
+
+            /*
+             * If Google gives us an event we cannot identify,
+             * leave it unchanged rather than incorrectly dimming it.
+             */
+            if (!calendarId) {
+                continue;
+            }
+
+            identified++;
+
             if (
-                !eventLooksMine(
-                    eventElement,
-                    mineNames,
-                    mineColors
+                primaryIds.includes(
+                    calendarId
                 )
             ) {
-                eventElement.classList.add(
-                    DIM_CLASS
-                );
+                mine++;
+                continue;
             }
+
+            eventElement.classList.add(
+                DIM_CLASS
+            );
+
+            dimmed++;
         }
 
-        return true;
-    }
-
-    function scheduleDimRefresh() {
-        if (!dimOthersActive) {
-            return;
-        }
-
-        clearTimeout(
-            dimRefreshTimer
+        console.log(
+            '[GCal Mine Only] Dim results:',
+            {
+                eventsFound:
+                    events.length,
+                identified,
+                mine,
+                dimmed
+            }
         );
 
-        dimRefreshTimer =
-            setTimeout(() => {
-                applyDimOthers()
-                    .catch(error => {
-                        console.error(
-                            '[GCal Mine Only] Failed to refresh dimming:',
-                            error
-                        );
-                    });
-            }, 250);
+        return true;
     }
 
     async function toggleDimOthers() {
@@ -976,10 +680,10 @@
 
                 dimOthersActive = false;
             } else {
-                const applied =
+                const success =
                     await applyDimOthers();
 
-                if (applied) {
+                if (success) {
                     dimOthersActive = true;
                 }
             }
@@ -999,16 +703,35 @@
         }
     }
 
+    function scheduleDimRefresh() {
+        if (!dimOthersActive) {
+            return;
+        }
+
+        clearTimeout(
+            dimRefreshTimer
+        );
+
+        dimRefreshTimer =
+            setTimeout(() => {
+                applyDimOthers()
+                    .catch(error => {
+                        console.error(
+                            '[GCal Mine Only] ' +
+                            'Could not refresh dimming:',
+                            error
+                        );
+                    });
+            }, 200);
+    }
+
     /* -------------------------------------------------------
      * BUTTONS
      * ----------------------------------------------------- */
 
     function showDetectionError() {
         alert(
-            'I could not find the calendar toggles.\n\n' +
-            'Make sure the left Google Calendar sidebar is visible.\n\n' +
-            'If it still fails, open DevTools -> Console and run:\n\n' +
-            'GCAL_MINE_ONLY_DEBUG()'
+            'Could not find the Google Calendar sidebar calendars.'
         );
     }
 
@@ -1022,15 +745,11 @@
 
         try {
             if (mineOnlyActive) {
-                await restorePreviousState();
+                await restoreCalendars();
             } else {
                 await activateMineOnly();
             }
 
-            /*
-             * If dimming is currently enabled, recalculate
-             * after calendars were shown/hidden.
-             */
             if (dimOthersActive) {
                 await applyDimOthers();
             }
@@ -1039,62 +758,9 @@
                 '[GCal Mine Only]',
                 error
             );
-
-            alert(
-                'Google Calendar Mine Only encountered an error.\n\n' +
-                'Check the browser console for details.'
-            );
         } finally {
             busy = false;
             updateButtons();
-        }
-    }
-
-    function updateButtons() {
-        const mainButton =
-            document.getElementById(
-                BUTTON_ID
-            );
-
-        const dimButton =
-            document.getElementById(
-                DIM_BUTTON_ID
-            );
-
-        if (mainButton) {
-            mainButton.disabled = busy;
-
-            mainButton.textContent =
-                busy
-                    ? 'Working...'
-                    : (
-                        mineOnlyActive
-                            ? 'Restore calendars'
-                            : 'Mine only'
-                    );
-
-            mainButton.title =
-                mineOnlyActive
-                    ? 'Restore the calendars that were visible before'
-                    : 'Show only your selected calendars';
-        }
-
-        if (dimButton) {
-            dimButton.disabled = busy;
-
-            dimButton.textContent =
-                busy
-                    ? 'Working...'
-                    : (
-                        dimOthersActive
-                            ? 'Undim others'
-                            : 'Dim others'
-                    );
-
-            dimButton.title =
-                dimOthersActive
-                    ? 'Restore other calendar events to full opacity'
-                    : 'Show other calendar events at 50% opacity';
         }
     }
 
@@ -1166,13 +832,8 @@
             button.addEventListener(
                 'click',
                 event => {
-                    /*
-                     * Shift-click resets which calendars
-                     * are considered yours.
-                     */
                     if (event.shiftKey) {
                         event.preventDefault();
-                        event.stopPropagation();
 
                         resetPrimaryCalendars();
                         return;
@@ -1192,32 +853,66 @@
                 DIM_BUTTON_ID
             )
         ) {
-            const dimButton =
+            const button =
                 document.createElement(
                     'button'
                 );
 
-            dimButton.id =
+            button.id =
                 DIM_BUTTON_ID;
 
-            dimButton.type = 'button';
+            button.type = 'button';
 
             styleButton(
-                dimButton,
+                button,
                 '58px'
             );
 
-            dimButton.addEventListener(
+            button.addEventListener(
                 'click',
                 toggleDimOthers
             );
 
             document.body.appendChild(
-                dimButton
+                button
             );
         }
 
         updateButtons();
+    }
+
+    function updateButtons() {
+        const mineButton =
+            document.getElementById(
+                BUTTON_ID
+            );
+
+        const dimButton =
+            document.getElementById(
+                DIM_BUTTON_ID
+            );
+
+        if (mineButton) {
+            mineButton.disabled = busy;
+
+            mineButton.textContent =
+                busy
+                    ? 'Working...'
+                    : mineOnlyActive
+                        ? 'Restore calendars'
+                        : 'Mine only';
+        }
+
+        if (dimButton) {
+            dimButton.disabled = busy;
+
+            dimButton.textContent =
+                busy
+                    ? 'Working...'
+                    : dimOthersActive
+                        ? 'Undim others'
+                        : 'Dim others';
+        }
     }
 
     /* -------------------------------------------------------
@@ -1227,60 +922,61 @@
     window.GCAL_MINE_ONLY_DEBUG =
         function () {
             const calendars =
-                getCalendarToggles();
+                getCalendars();
 
-            const primaryIds =
-                loadPrimaryCalendars() ||
+            const primary =
+                loadPrimaryCalendarIds() ||
                 [];
 
-            const results =
+            console.table(
                 calendars.map(
                     (calendar, index) => ({
                         number:
                             index + 1,
-                        id:
-                            calendar.id,
                         name:
                             calendar.name,
-                        occurrence:
-                            calendar.occurrence,
-                        displayName:
-                            getDisplayName(
-                                calendar,
-                                calendars
-                            ),
+                        calendarId:
+                            calendar.id,
                         checked:
                             calendar.checked,
-                        selectedAsMine:
-                            primaryIds.includes(
+                        mine:
+                            primary.includes(
                                 calendar.id
-                            ),
-                        ariaLabel:
-                            calendar.element
-                                .getAttribute(
-                                    'aria-label'
-                                ),
-                        role:
-                            calendar.element
-                                .getAttribute(
-                                    'role'
-                                )
+                            )
                     })
-                );
-
-            console.table(results);
-
-            console.log(
-                '[GCal Mine Only] Event candidates:',
-                getEventCandidates().length
+                )
             );
 
-            console.log(
-                '[GCal Mine Only] Dim active:',
-                dimOthersActive
+            const events =
+                getEventElements();
+
+            console.table(
+                events
+                    .slice(0, 50)
+                    .map(
+                        (
+                            event,
+                            index
+                        ) => ({
+                            number:
+                                index + 1,
+                            calendarId:
+                                getEventCalendarId(
+                                    event
+                                ),
+                            dimmed:
+                                event.classList
+                                    .contains(
+                                        DIM_CLASS
+                                    )
+                        })
+                    )
             );
 
-            return results;
+            return {
+                calendars,
+                events
+            };
         };
 
     /* -------------------------------------------------------
@@ -1304,8 +1000,8 @@
             }
 
             /*
-             * Google Calendar adds/removes event DOM nodes
-             * while navigating weeks, scrolling, etc.
+             * Google constantly creates/replaces event DOM elements
+             * while navigating and scrolling.
              */
             scheduleDimRefresh();
         });
