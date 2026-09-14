@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Google Calendar - Mine Only / Restore
 // @namespace    local.gcal.mine-only
-// @version      1.3.0
-// @description  Toggle between your own calendars and your previous Google Calendar visibility state.
+// @version      1.4.0
+// @description  Toggle your own calendars, restore visibility, and dim events from other calendars.
 // @match        https://calendar.google.com/*
 // @grant        none
 // @run-at       document-idle
@@ -18,12 +18,21 @@
 
     const STORAGE_KEY_PRIMARY = 'gcalMineOnly.primaryCalendars';
     const STORAGE_KEY_STATE = 'gcalMineOnly.previousState';
+
     const BUTTON_ID = 'gcal-mine-only-toggle';
+    const DIM_BUTTON_ID = 'gcal-dim-others-toggle';
+
+    const DIM_CLASS = 'gcal-mine-only-dimmed';
+    const DIM_STYLE_ID = 'gcal-mine-only-dim-style';
+    const DIM_OPACITY = 0.5;
 
     let mineOnlyActive = false;
+    let dimOthersActive = false;
     let busy = false;
+    let dimRefreshTimer = null;
 
-    const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+    const sleep = ms =>
+        new Promise(resolve => setTimeout(resolve, ms));
 
     function cleanCalendarName(name) {
         return (name || '')
@@ -55,7 +64,8 @@
             return element.checked;
         }
 
-        const ariaChecked = element.getAttribute('aria-checked');
+        const ariaChecked =
+            element.getAttribute('aria-checked');
 
         if (ariaChecked === 'true') return true;
         if (ariaChecked === 'false') return false;
@@ -66,14 +76,16 @@
     function looksLikeDateControl(text) {
         if (!text) return false;
 
-        const datePatterns = [
+        const patterns = [
             /^\d{1,2}\s*,\s*\p{L}+/iu,
             /^\d{1,2}\s+\p{L}+\s*,\s*\p{L}+/iu,
             /^\d{1,2}\s+\p{L}+\s+\d{4}$/iu,
             /^\p{L}+\s+\d{1,2}(?:,\s*\d{4})?$/iu
         ];
 
-        return datePatterns.some(pattern => pattern.test(text));
+        return patterns.some(
+            pattern => pattern.test(text)
+        );
     }
 
     function looksLikeUiControl(text) {
@@ -117,7 +129,9 @@
             "andere agenda's"
         ]);
 
-        return rejected.has(text.toLowerCase());
+        return rejected.has(
+            text.toLowerCase()
+        );
     }
 
     function getCalendarName(element) {
@@ -128,7 +142,8 @@
         ];
 
         for (const candidate of directCandidates) {
-            const name = cleanCalendarName(candidate);
+            const name =
+                cleanCalendarName(candidate);
 
             if (
                 name &&
@@ -147,20 +162,35 @@
             depth < 3 && node;
             depth++, node = node.parentElement
         ) {
-            const lines = (node.innerText || '')
-                .split('\n')
-                .map(line => cleanCalendarName(line))
-                .filter(Boolean);
+            const lines =
+                (node.innerText || '')
+                    .split('\n')
+                    .map(
+                        line =>
+                            cleanCalendarName(line)
+                    )
+                    .filter(Boolean);
 
             if (lines.length > 4) {
                 break;
             }
 
             const candidates = lines
-                .filter(line => line.length <= 120)
-                .filter(line => !looksLikeDateControl(line))
-                .filter(line => !looksLikeUiControl(line))
-                .sort((a, b) => b.length - a.length);
+                .filter(
+                    line => line.length <= 120
+                )
+                .filter(
+                    line =>
+                        !looksLikeDateControl(line)
+                )
+                .filter(
+                    line =>
+                        !looksLikeUiControl(line)
+                )
+                .sort(
+                    (a, b) =>
+                        b.length - a.length
+                );
 
             if (candidates.length > 0) {
                 return candidates[0];
@@ -179,20 +209,32 @@
             '[aria-checked="false"]'
         ].join(',');
 
-        return [...document.querySelectorAll(selector)]
+        return [
+            ...document.querySelectorAll(
+                selector
+            )
+        ]
             .filter(isVisible)
             .filter(element => {
-                const rect = element.getBoundingClientRect();
+                const rect =
+                    element.getBoundingClientRect();
 
-                if (rect.left > 450 || rect.top < 260) {
+                if (
+                    rect.left > 450 ||
+                    rect.top < 260
+                ) {
                     return false;
                 }
 
-                if (getCheckedState(element) === null) {
+                if (
+                    getCheckedState(element) ===
+                    null
+                ) {
                     return false;
                 }
 
-                const name = getCalendarName(element);
+                const name =
+                    getCalendarName(element);
 
                 return (
                     Boolean(name) &&
@@ -203,42 +245,64 @@
     }
 
     function getCalendarToggles() {
-        const candidates = findToggleCandidates();
-        const occurrenceCounter = new Map();
+        const candidates =
+            findToggleCandidates();
+
+        const occurrenceCounter =
+            new Map();
 
         return candidates.map(element => {
-            const name = getCalendarName(element);
+            const name =
+                getCalendarName(element);
 
             const occurrence =
-                (occurrenceCounter.get(name) || 0) + 1;
+                (occurrenceCounter.get(name) ||
+                    0) + 1;
 
-            occurrenceCounter.set(name, occurrence);
+            occurrenceCounter.set(
+                name,
+                occurrence
+            );
 
             return {
-                id: JSON.stringify([name, occurrence]),
+                id: JSON.stringify([
+                    name,
+                    occurrence
+                ]),
                 name,
                 occurrence,
                 element,
-                checked: getCheckedState(element)
+                checked:
+                    getCheckedState(element)
             };
         });
     }
 
-    function getDisplayName(calendar, calendars) {
-        const sameNameCount = calendars.filter(
-            item => item.name === calendar.name
-        ).length;
+    function getDisplayName(
+        calendar,
+        calendars
+    ) {
+        const sameNameCount =
+            calendars.filter(
+                item =>
+                    item.name === calendar.name
+            ).length;
 
         return sameNameCount > 1
             ? `${calendar.name} [${calendar.occurrence}]`
             : calendar.name;
     }
 
-    async function waitForCalendars(timeout = 10000) {
+    async function waitForCalendars(
+        timeout = 10000
+    ) {
         const started = Date.now();
 
-        while (Date.now() - started < timeout) {
-            const calendars = getCalendarToggles();
+        while (
+            Date.now() - started < timeout
+        ) {
+            const calendars =
+                getCalendarToggles();
 
             if (calendars.length > 0) {
                 return calendars;
@@ -250,7 +314,10 @@
         return [];
     }
 
-    async function clickToggle(calendar, targetState) {
+    async function clickToggle(
+        calendar,
+        targetState
+    ) {
         const currentState =
             getCheckedState(calendar.element);
 
@@ -271,14 +338,17 @@
 
     function loadPrimaryCalendars() {
         const saved =
-            localStorage.getItem(STORAGE_KEY_PRIMARY);
+            localStorage.getItem(
+                STORAGE_KEY_PRIMARY
+            );
 
         if (!saved) {
             return null;
         }
 
         try {
-            const value = JSON.parse(saved);
+            const value =
+                JSON.parse(saved);
 
             return Array.isArray(value)
                 ? value
@@ -288,16 +358,19 @@
         }
     }
 
-    async function choosePrimaryCalendars(calendars) {
-        const numbered = calendars
-            .map(
-                (calendar, index) =>
-                    `${index + 1}. ${getDisplayName(
-                        calendar,
-                        calendars
-                    )}`
-            )
-            .join('\n');
+    async function choosePrimaryCalendars(
+        calendars
+    ) {
+        const numbered =
+            calendars
+                .map(
+                    (calendar, index) =>
+                        `${index + 1}. ${getDisplayName(
+                            calendar,
+                            calendars
+                        )}`
+                )
+                .join('\n');
 
         const answer = prompt(
             'Which calendars are yours?\n\n' +
@@ -330,7 +403,8 @@
                 index =>
                     Number.isNaN(index) ||
                     index < 0 ||
-                    index >= calendars.length
+                    index >=
+                        calendars.length
             )
         ) {
             alert(
@@ -342,9 +416,11 @@
             return null;
         }
 
-        const selectedIds = indexes.map(
-            index => calendars[index].id
-        );
+        const selectedIds =
+            indexes.map(
+                index =>
+                    calendars[index].id
+            );
 
         localStorage.setItem(
             STORAGE_KEY_PRIMARY,
@@ -354,15 +430,9 @@
         return selectedIds;
     }
 
-    async function activateMineOnly() {
-        const calendars =
-            await waitForCalendars();
-
-        if (!calendars.length) {
-            showDetectionError();
-            return;
-        }
-
+    async function ensurePrimaryCalendars(
+        calendars
+    ) {
         let primaryIds =
             loadPrimaryCalendars();
 
@@ -381,10 +451,27 @@
                 await choosePrimaryCalendars(
                     calendars
                 );
+        }
 
-            if (!primaryIds) {
-                return;
-            }
+        return primaryIds;
+    }
+
+    async function activateMineOnly() {
+        const calendars =
+            await waitForCalendars();
+
+        if (!calendars.length) {
+            showDetectionError();
+            return;
+        }
+
+        const primaryIds =
+            await ensurePrimaryCalendars(
+                calendars
+            );
+
+        if (!primaryIds) {
+            return;
         }
 
         const previousState =
@@ -401,7 +488,10 @@
             JSON.stringify(previousState)
         );
 
-        for (const savedCalendar of previousState) {
+        for (
+            const savedCalendar
+            of previousState
+        ) {
             const currentCalendar =
                 getCalendarToggles().find(
                     calendar =>
@@ -422,7 +512,7 @@
         }
 
         mineOnlyActive = true;
-        updateButton();
+        updateButtons();
     }
 
     async function restorePreviousState() {
@@ -458,7 +548,10 @@
             return;
         }
 
-        for (const savedCalendar of previousState) {
+        for (
+            const savedCalendar
+            of previousState
+        ) {
             const currentCalendar =
                 getCalendarToggles().find(
                     calendar =>
@@ -479,7 +572,7 @@
         }
 
         mineOnlyActive = false;
-        updateButton();
+        updateButtons();
     }
 
     function resetPrimaryCalendars() {
@@ -488,14 +581,427 @@
         );
 
         mineOnlyActive = false;
+        dimOthersActive = false;
+
+        clearDimmedEvents();
 
         alert(
             'Your calendar selection has been reset.\n\n' +
-            'Click "Mine only" again to choose your calendars.'
+            'Click "Mine only" or "Dim others" to choose your calendars again.'
         );
 
-        updateButton();
+        updateButtons();
     }
+
+    /* -------------------------------------------------------
+     * DIM OTHER CALENDARS
+     * ----------------------------------------------------- */
+
+    function ensureDimStyle() {
+        if (
+            document.getElementById(
+                DIM_STYLE_ID
+            )
+        ) {
+            return;
+        }
+
+        const style =
+            document.createElement('style');
+
+        style.id = DIM_STYLE_ID;
+
+        style.textContent =
+            `.${DIM_CLASS} { ` +
+            `opacity: ${DIM_OPACITY} !important; ` +
+            `}`;
+
+        document.head.appendChild(style);
+    }
+
+    function normalizeColor(color) {
+        if (!color) {
+            return null;
+        }
+
+        const value =
+            color.trim().toLowerCase();
+
+        if (
+            value === 'transparent' ||
+            value ===
+                'rgba(0, 0, 0, 0)' ||
+            value ===
+                'rgb(255, 255, 255)' ||
+            value ===
+                'rgb(0, 0, 0)'
+        ) {
+            return null;
+        }
+
+        return value;
+    }
+
+    function getCalendarColorCandidates(
+        calendar
+    ) {
+        const colors = new Set();
+
+        let node = calendar.element;
+
+        for (
+            let depth = 0;
+            depth < 4 && node;
+            depth++, node = node.parentElement
+        ) {
+            const descendants = [
+                node,
+                ...node.querySelectorAll('*')
+            ];
+
+            for (
+                const element
+                of descendants.slice(0, 40)
+            ) {
+                const style =
+                    getComputedStyle(element);
+
+                const candidates = [
+                    style.backgroundColor,
+                    style.borderColor,
+                    style.color
+                ];
+
+                for (
+                    const color
+                    of candidates
+                ) {
+                    const normalized =
+                        normalizeColor(color);
+
+                    if (normalized) {
+                        colors.add(
+                            normalized
+                        );
+                    }
+                }
+            }
+        }
+
+        return colors;
+    }
+
+    function getEventColorCandidates(
+        element
+    ) {
+        const colors = new Set();
+
+        let node = element;
+
+        for (
+            let depth = 0;
+            depth < 3 && node;
+            depth++, node = node.parentElement
+        ) {
+            const style =
+                getComputedStyle(node);
+
+            const candidates = [
+                style.backgroundColor,
+                style.borderColor,
+                style.borderLeftColor,
+                style.borderTopColor,
+                style.color
+            ];
+
+            for (
+                const color
+                of candidates
+            ) {
+                const normalized =
+                    normalizeColor(color);
+
+                if (normalized) {
+                    colors.add(normalized);
+                }
+            }
+        }
+
+        return colors;
+    }
+
+    function getEventCandidates() {
+        const selector = [
+            '[data-eventid]',
+            '[data-event-id]',
+            '[data-eventchip]',
+            '[role="button"][aria-label]'
+        ].join(',');
+
+        const seen = new Set();
+        const result = [];
+
+        for (
+            const element
+            of document.querySelectorAll(
+                selector
+            )
+        ) {
+            if (!isVisible(element)) {
+                continue;
+            }
+
+            const rect =
+                element.getBoundingClientRect();
+
+            /*
+             * Ignore Google's sidebar and top toolbar.
+             */
+            if (
+                rect.left < 220 ||
+                rect.top < 70
+            ) {
+                continue;
+            }
+
+            if (
+                rect.width < 12 ||
+                rect.height < 8
+            ) {
+                continue;
+            }
+
+            const text = [
+                element.getAttribute(
+                    'aria-label'
+                ),
+                element.getAttribute(
+                    'title'
+                ),
+                element.getAttribute(
+                    'data-tooltip'
+                ),
+                element.innerText
+            ]
+                .filter(Boolean)
+                .join(' ');
+
+            if (!text.trim()) {
+                continue;
+            }
+
+            if (seen.has(element)) {
+                continue;
+            }
+
+            seen.add(element);
+            result.push(element);
+        }
+
+        return result;
+    }
+
+    function eventLooksMine(
+        eventElement,
+        mineNames,
+        mineColors
+    ) {
+        const searchableText = [
+            eventElement.getAttribute(
+                'aria-label'
+            ),
+            eventElement.getAttribute(
+                'title'
+            ),
+            eventElement.getAttribute(
+                'data-tooltip'
+            ),
+            eventElement.innerText
+        ]
+            .filter(Boolean)
+            .join(' ')
+            .toLowerCase();
+
+        /*
+         * First try calendar-name information exposed
+         * by Google in accessibility metadata.
+         */
+        for (const name of mineNames) {
+            if (
+                name &&
+                searchableText.includes(
+                    name.toLowerCase()
+                )
+            ) {
+                return true;
+            }
+        }
+
+        /*
+         * Fallback: compare the visible event color
+         * against colors from your selected calendars.
+         */
+        const eventColors =
+            getEventColorCandidates(
+                eventElement
+            );
+
+        for (const color of eventColors) {
+            if (mineColors.has(color)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    function clearDimmedEvents() {
+        document
+            .querySelectorAll(
+                `.${DIM_CLASS}`
+            )
+            .forEach(element => {
+                element.classList.remove(
+                    DIM_CLASS
+                );
+            });
+    }
+
+    async function applyDimOthers() {
+        const calendars =
+            await waitForCalendars();
+
+        if (!calendars.length) {
+            showDetectionError();
+            return false;
+        }
+
+        const primaryIds =
+            await ensurePrimaryCalendars(
+                calendars
+            );
+
+        if (!primaryIds) {
+            return false;
+        }
+
+        ensureDimStyle();
+        clearDimmedEvents();
+
+        const mineCalendars =
+            calendars.filter(
+                calendar =>
+                    primaryIds.includes(
+                        calendar.id
+                    )
+            );
+
+        const mineNames = [
+            ...new Set(
+                mineCalendars.map(
+                    calendar =>
+                        calendar.name
+                )
+            )
+        ];
+
+        const mineColors = new Set();
+
+        for (
+            const calendar
+            of mineCalendars
+        ) {
+            for (
+                const color
+                of getCalendarColorCandidates(
+                    calendar
+                )
+            ) {
+                mineColors.add(color);
+            }
+        }
+
+        for (
+            const eventElement
+            of getEventCandidates()
+        ) {
+            if (
+                !eventLooksMine(
+                    eventElement,
+                    mineNames,
+                    mineColors
+                )
+            ) {
+                eventElement.classList.add(
+                    DIM_CLASS
+                );
+            }
+        }
+
+        return true;
+    }
+
+    function scheduleDimRefresh() {
+        if (!dimOthersActive) {
+            return;
+        }
+
+        clearTimeout(
+            dimRefreshTimer
+        );
+
+        dimRefreshTimer =
+            setTimeout(() => {
+                applyDimOthers()
+                    .catch(error => {
+                        console.error(
+                            '[GCal Mine Only] Failed to refresh dimming:',
+                            error
+                        );
+                    });
+            }, 250);
+    }
+
+    async function toggleDimOthers() {
+        if (busy) {
+            return;
+        }
+
+        busy = true;
+        updateButtons();
+
+        try {
+            if (dimOthersActive) {
+                clearDimmedEvents();
+
+                dimOthersActive = false;
+            } else {
+                const applied =
+                    await applyDimOthers();
+
+                if (applied) {
+                    dimOthersActive = true;
+                }
+            }
+        } catch (error) {
+            console.error(
+                '[GCal Mine Only]',
+                error
+            );
+
+            alert(
+                'Could not apply transparency.\n\n' +
+                'Check the browser console for details.'
+            );
+        } finally {
+            busy = false;
+            updateButtons();
+        }
+    }
+
+    /* -------------------------------------------------------
+     * BUTTONS
+     * ----------------------------------------------------- */
 
     function showDetectionError() {
         alert(
@@ -506,19 +1012,27 @@
         );
     }
 
-    async function toggle() {
+    async function toggleMineOnly() {
         if (busy) {
             return;
         }
 
         busy = true;
-        updateButton();
+        updateButtons();
 
         try {
             if (mineOnlyActive) {
                 await restorePreviousState();
             } else {
                 await activateMineOnly();
+            }
+
+            /*
+             * If dimming is currently enabled, recalculate
+             * after calendars were shown/hidden.
+             */
+            if (dimOthersActive) {
+                await applyDimOthers();
             }
         } catch (error) {
             console.error(
@@ -532,63 +1046,68 @@
             );
         } finally {
             busy = false;
-            updateButton();
+            updateButtons();
         }
     }
 
-    function updateButton() {
-        const button =
+    function updateButtons() {
+        const mainButton =
             document.getElementById(
                 BUTTON_ID
             );
 
-        if (!button) {
-            return;
-        }
-
-        if (busy) {
-            button.disabled = true;
-            button.textContent =
-                'Working...';
-            return;
-        }
-
-        button.disabled = false;
-
-        button.textContent =
-            mineOnlyActive
-                ? 'Restore calendars'
-                : 'Mine only';
-
-        button.title =
-            mineOnlyActive
-                ? 'Restore the calendars that were visible before'
-                : 'Show only your selected calendars';
-    }
-
-    function createButton() {
-        if (
+        const dimButton =
             document.getElementById(
-                BUTTON_ID
-            )
-        ) {
-            return;
-        }
-
-        const button =
-            document.createElement(
-                'button'
+                DIM_BUTTON_ID
             );
 
-        button.id = BUTTON_ID;
-        button.type = 'button';
+        if (mainButton) {
+            mainButton.disabled = busy;
 
+            mainButton.textContent =
+                busy
+                    ? 'Working...'
+                    : (
+                        mineOnlyActive
+                            ? 'Restore calendars'
+                            : 'Mine only'
+                    );
+
+            mainButton.title =
+                mineOnlyActive
+                    ? 'Restore the calendars that were visible before'
+                    : 'Show only your selected calendars';
+        }
+
+        if (dimButton) {
+            dimButton.disabled = busy;
+
+            dimButton.textContent =
+                busy
+                    ? 'Working...'
+                    : (
+                        dimOthersActive
+                            ? 'Undim others'
+                            : 'Dim others'
+                    );
+
+            dimButton.title =
+                dimOthersActive
+                    ? 'Restore other calendar events to full opacity'
+                    : 'Show other calendar events at 50% opacity';
+        }
+    }
+
+    function styleButton(
+        button,
+        bottom
+    ) {
         Object.assign(
             button.style,
             {
                 position: 'fixed',
                 left: '16px',
-                bottom: '18px',
+                bottom,
                 zIndex: '99999',
                 padding: '8px 13px',
                 border:
@@ -623,33 +1142,96 @@
                     '#fff';
             }
         );
-
-        button.addEventListener(
-            'click',
-            event => {
-                if (event.shiftKey) {
-                    event.preventDefault();
-                    event.stopPropagation();
-
-                    resetPrimaryCalendars();
-                    return;
-                }
-
-                toggle();
-            }
-        );
-
-        document.body.appendChild(
-            button
-        );
-
-        updateButton();
     }
+
+    function createButtons() {
+        if (
+            !document.getElementById(
+                BUTTON_ID
+            )
+        ) {
+            const button =
+                document.createElement(
+                    'button'
+                );
+
+            button.id = BUTTON_ID;
+            button.type = 'button';
+
+            styleButton(
+                button,
+                '18px'
+            );
+
+            button.addEventListener(
+                'click',
+                event => {
+                    /*
+                     * Shift-click resets which calendars
+                     * are considered yours.
+                     */
+                    if (event.shiftKey) {
+                        event.preventDefault();
+                        event.stopPropagation();
+
+                        resetPrimaryCalendars();
+                        return;
+                    }
+
+                    toggleMineOnly();
+                }
+            );
+
+            document.body.appendChild(
+                button
+            );
+        }
+
+        if (
+            !document.getElementById(
+                DIM_BUTTON_ID
+            )
+        ) {
+            const dimButton =
+                document.createElement(
+                    'button'
+                );
+
+            dimButton.id =
+                DIM_BUTTON_ID;
+
+            dimButton.type = 'button';
+
+            styleButton(
+                dimButton,
+                '58px'
+            );
+
+            dimButton.addEventListener(
+                'click',
+                toggleDimOthers
+            );
+
+            document.body.appendChild(
+                dimButton
+            );
+        }
+
+        updateButtons();
+    }
+
+    /* -------------------------------------------------------
+     * DEBUG
+     * ----------------------------------------------------- */
 
     window.GCAL_MINE_ONLY_DEBUG =
         function () {
             const calendars =
                 getCalendarToggles();
+
+            const primaryIds =
+                loadPrimaryCalendars() ||
+                [];
 
             const results =
                 calendars.map(
@@ -669,38 +1251,63 @@
                             ),
                         checked:
                             calendar.checked,
-                        ariaLabel:
-                            calendar.element.getAttribute(
-                                'aria-label'
+                        selectedAsMine:
+                            primaryIds.includes(
+                                calendar.id
                             ),
+                        ariaLabel:
+                            calendar.element
+                                .getAttribute(
+                                    'aria-label'
+                                ),
                         role:
-                            calendar.element.getAttribute(
-                                'role'
-                            )
+                            calendar.element
+                                .getAttribute(
+                                    'role'
+                                )
                     })
                 );
 
             console.table(results);
 
             console.log(
-                '[GCal Mine Only] Selected calendars:',
-                loadPrimaryCalendars()
+                '[GCal Mine Only] Event candidates:',
+                getEventCandidates().length
+            );
+
+            console.log(
+                '[GCal Mine Only] Dim active:',
+                dimOthersActive
             );
 
             return results;
         };
 
-    createButton();
+    /* -------------------------------------------------------
+     * INITIALISE
+     * ----------------------------------------------------- */
+
+    ensureDimStyle();
+    createButtons();
 
     const observer =
         new MutationObserver(() => {
             if (
                 !document.getElementById(
                     BUTTON_ID
+                ) ||
+                !document.getElementById(
+                    DIM_BUTTON_ID
                 )
             ) {
-                createButton();
+                createButtons();
             }
+
+            /*
+             * Google Calendar adds/removes event DOM nodes
+             * while navigating weeks, scrolling, etc.
+             */
+            scheduleDimRefresh();
         });
 
     observer.observe(
