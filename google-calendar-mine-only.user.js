@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Google Calendar - Mine Only / Restore
 // @namespace    local.gcal.mine-only
-// @version      1.2.0
+// @version      1.3.0
 // @description  Toggle between your own calendars and your previous Google Calendar visibility state.
 // @match        https://calendar.google.com/*
 // @grant        none
@@ -23,9 +23,7 @@
     let mineOnlyActive = false;
     let busy = false;
 
-    function sleep(ms) {
-        return new Promise(resolve => setTimeout(resolve, ms));
-    }
+    const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
     function cleanCalendarName(name) {
         return (name || '')
@@ -114,71 +112,12 @@
             'contacts',
             'contacten',
             'my calendars',
-            'mijn agenda\'s',
+            "mijn agenda's",
             'other calendars',
-            'andere agenda\'s'
+            "andere agenda's"
         ]);
 
         return rejected.has(text.toLowerCase());
-    }
-
-    function getCalendarSidebarArea() {
-        const possibleHeaders = new Set([
-            'My calendars',
-            'Other calendars',
-            'Mijn agenda\'s',
-            'Andere agenda\'s'
-        ]);
-
-        const allElements = [...document.querySelectorAll('body *')];
-
-        const headers = allElements.filter(element => {
-            const text = element.textContent?.trim();
-            return possibleHeaders.has(text);
-        });
-
-        if (headers.length === 0) {
-            return document.body;
-        }
-
-        const containers = headers
-            .map(header => {
-                let node = header;
-
-                for (
-                    let depth = 0;
-                    depth < 7 && node;
-                    depth++, node = node.parentElement
-                ) {
-                    const rect = node.getBoundingClientRect();
-
-                    if (
-                        rect.width > 150 &&
-                        rect.width < 500 &&
-                        rect.height > 40
-                    ) {
-                        return node;
-                    }
-                }
-
-                return header.parentElement;
-            })
-            .filter(Boolean);
-
-        if (containers.length === 0) {
-            return document.body;
-        }
-
-        let common = containers[0];
-
-        while (
-            common &&
-            !containers.every(container => common.contains(container))
-        ) {
-            common = common.parentElement;
-        }
-
-        return common || document.body;
     }
 
     function getCalendarName(element) {
@@ -194,7 +133,8 @@
             if (
                 name &&
                 name.length <= 120 &&
-                !looksLikeDateControl(name)
+                !looksLikeDateControl(name) &&
+                !looksLikeUiControl(name)
             ) {
                 return name;
             }
@@ -207,9 +147,7 @@
             depth < 3 && node;
             depth++, node = node.parentElement
         ) {
-            const rawText = node.innerText || '';
-
-            const lines = rawText
+            const lines = (node.innerText || '')
                 .split('\n')
                 .map(line => cleanCalendarName(line))
                 .filter(Boolean);
@@ -233,8 +171,6 @@
     }
 
     function findToggleCandidates() {
-        const sidebar = getCalendarSidebarArea();
-
         const selector = [
             '[role="checkbox"][aria-checked]',
             '[role="switch"][aria-checked]',
@@ -243,16 +179,12 @@
             '[aria-checked="false"]'
         ].join(',');
 
-        return [...sidebar.querySelectorAll(selector)]
+        return [...document.querySelectorAll(selector)]
             .filter(isVisible)
             .filter(element => {
                 const rect = element.getBoundingClientRect();
 
-                if (rect.left > 450) {
-                    return false;
-                }
-
-                if (rect.top < 260) {
+                if (rect.left > 450 || rect.top < 260) {
                     return false;
                 }
 
@@ -262,72 +194,34 @@
 
                 const name = getCalendarName(element);
 
-                if (!name) {
-                    return false;
-                }
-
-                if (looksLikeDateControl(name)) {
-                    return false;
-                }
-
-                if (looksLikeUiControl(name)) {
-                    return false;
-                }
-
-                return true;
+                return (
+                    Boolean(name) &&
+                    !looksLikeDateControl(name) &&
+                    !looksLikeUiControl(name)
+                );
             });
     }
 
-    /**
-     * Return all detected calendars.
-     *
-     * Duplicate names are intentionally preserved.
-     *
-     * Each calendar gets an ID consisting of:
-     *
-     *     calendar name + occurrence number
-     *
-     * Example:
-     *
-     *     Work #1
-     *     Work #2
-     *     Work #3
-     *
-     * The occurrence number is based on sidebar order.
-     */
     function getCalendarToggles() {
         const candidates = findToggleCandidates();
-
         const occurrenceCounter = new Map();
-        const calendars = [];
 
-        for (const element of candidates) {
+        return candidates.map(element => {
             const name = getCalendarName(element);
-
-            if (!name) {
-                continue;
-            }
 
             const occurrence =
                 (occurrenceCounter.get(name) || 0) + 1;
 
             occurrenceCounter.set(name, occurrence);
 
-            const id = JSON.stringify([
-                name,
-                occurrence
-            ]);
-
-            calendars.push({
-                id,
+            return {
+                id: JSON.stringify([name, occurrence]),
                 name,
                 occurrence,
                 element,
                 checked: getCheckedState(element)
-            });
-        }
-
-        return calendars;
+            };
+        });
     }
 
     function getDisplayName(calendar, calendars) {
@@ -335,11 +229,9 @@
             item => item.name === calendar.name
         ).length;
 
-        if (sameNameCount > 1) {
-            return `${calendar.name} [${calendar.occurrence}]`;
-        }
-
-        return calendar.name;
+        return sameNameCount > 1
+            ? `${calendar.name} [${calendar.occurrence}]`
+            : calendar.name;
     }
 
     async function waitForCalendars(timeout = 10000) {
@@ -349,19 +241,6 @@
             const calendars = getCalendarToggles();
 
             if (calendars.length > 0) {
-                console.table(
-                    calendars.map(calendar => ({
-                        id: calendar.id,
-                        name: calendar.name,
-                        occurrence: calendar.occurrence,
-                        checked: calendar.checked,
-                        tag: calendar.element.tagName,
-                        role: calendar.element.getAttribute('role'),
-                        ariaLabel:
-                            calendar.element.getAttribute('aria-label')
-                    }))
-                );
-
                 return calendars;
             }
 
@@ -390,28 +269,40 @@
         await sleep(180);
     }
 
-    /**
-     * Let the user choose one or more calendars.
-     *
-     * Accepted input examples:
-     *
-     *     1
-     *     1,2,3
-     *     1, 3, 7
-     */
+    function loadPrimaryCalendars() {
+        const saved =
+            localStorage.getItem(STORAGE_KEY_PRIMARY);
+
+        if (!saved) {
+            return null;
+        }
+
+        try {
+            const value = JSON.parse(saved);
+
+            return Array.isArray(value)
+                ? value
+                : null;
+        } catch {
+            return null;
+        }
+    }
+
     async function choosePrimaryCalendars(calendars) {
         const numbered = calendars
             .map(
                 (calendar, index) =>
-                    `${index + 1}. ${getDisplayName(calendar, calendars)}`
+                    `${index + 1}. ${getDisplayName(
+                        calendar,
+                        calendars
+                    )}`
             )
             .join('\n');
 
         const answer = prompt(
             'Which calendars are yours?\n\n' +
             numbered +
-            '\n\n' +
-            'Enter one or more numbers separated by commas.\n' +
+            '\n\nEnter one or more numbers separated by commas.\n' +
             'Example: 1,2,5'
         );
 
@@ -423,7 +314,13 @@
             ...new Set(
                 answer
                     .split(',')
-                    .map(value => Number.parseInt(value.trim(), 10) - 1)
+                    .map(
+                        value =>
+                            Number.parseInt(
+                                value.trim(),
+                                10
+                            ) - 1
+                    )
             )
         ];
 
@@ -438,15 +335,16 @@
         ) {
             alert(
                 'Invalid selection.\n\n' +
-                'Enter calendar numbers separated by commas, for example:\n\n' +
-                '1,2,5'
+                'Enter calendar numbers separated by commas, ' +
+                'for example: 1,2,5'
             );
 
             return null;
         }
 
-        const selectedIds =
-            indexes.map(index => calendars[index].id);
+        const selectedIds = indexes.map(
+            index => calendars[index].id
+        );
 
         localStorage.setItem(
             STORAGE_KEY_PRIMARY,
@@ -456,66 +354,46 @@
         return selectedIds;
     }
 
-    function loadPrimaryCalendars() {
-        const saved =
-            localStorage.getItem(STORAGE_KEY_PRIMARY);
-
-        if (!saved) {
-            return null;
-        }
-
-        try {
-            const value = JSON.parse(saved);
-
-            if (!Array.isArray(value)) {
-                return null;
-            }
-
-            return value;
-        } catch {
-            return null;
-        }
-    }
-
     async function activateMineOnly() {
-        const calendars = await waitForCalendars();
+        const calendars =
+            await waitForCalendars();
 
         if (!calendars.length) {
             showDetectionError();
             return;
         }
 
-        let primaryIds = loadPrimaryCalendars();
+        let primaryIds =
+            loadPrimaryCalendars();
 
-        /*
-         * Re-run setup if there is no saved selection or if one of the
-         * previously selected calendars can no longer be found.
-         */
         if (
             !primaryIds ||
             primaryIds.length === 0 ||
             primaryIds.some(
-                id => !calendars.some(calendar => calendar.id === id)
+                id =>
+                    !calendars.some(
+                        calendar =>
+                            calendar.id === id
+                    )
             )
         ) {
             primaryIds =
-                await choosePrimaryCalendars(calendars);
+                await choosePrimaryCalendars(
+                    calendars
+                );
 
             if (!primaryIds) {
                 return;
             }
         }
 
-        /*
-         * Save the complete current visibility state.
-         */
         const previousState =
             calendars.map(calendar => ({
                 id: calendar.id,
-                name: calendar.name,
-                occurrence: calendar.occurrence,
                 checked:
-                    getCheckedState(calendar.element)
+                    getCheckedState(
+                        calendar.element
+                    )
             }));
 
         localStorage.setItem(
@@ -523,32 +401,23 @@
             JSON.stringify(previousState)
         );
 
-        /*
-         * Toggle calendars one at a time.
-         *
-         * The DOM is re-read after every click because Google Calendar can
-         * rebuild sidebar nodes whenever visibility changes.
-         */
         for (const savedCalendar of previousState) {
-            const currentCalendars =
-                getCalendarToggles();
-
             const currentCalendar =
-                currentCalendars.find(
+                getCalendarToggles().find(
                     calendar =>
-                        calendar.id === savedCalendar.id
+                        calendar.id ===
+                        savedCalendar.id
                 );
 
             if (!currentCalendar) {
                 continue;
             }
 
-            const shouldBeVisible =
-                primaryIds.includes(savedCalendar.id);
-
             await clickToggle(
                 currentCalendar,
-                shouldBeVisible
+                primaryIds.includes(
+                    savedCalendar.id
+                )
             );
         }
 
@@ -558,7 +427,9 @@
 
     async function restorePreviousState() {
         const saved =
-            localStorage.getItem(STORAGE_KEY_STATE);
+            localStorage.getItem(
+                STORAGE_KEY_STATE
+            );
 
         if (!saved) {
             alert(
@@ -570,7 +441,8 @@
         let previousState;
 
         try {
-            previousState = JSON.parse(saved);
+            previousState =
+                JSON.parse(saved);
         } catch {
             alert(
                 'The saved calendar state is invalid.'
@@ -578,7 +450,8 @@
             return;
         }
 
-        const calendars = await waitForCalendars();
+        const calendars =
+            await waitForCalendars();
 
         if (!calendars.length) {
             showDetectionError();
@@ -586,13 +459,11 @@
         }
 
         for (const savedCalendar of previousState) {
-            const currentCalendars =
-                getCalendarToggles();
-
             const currentCalendar =
-                currentCalendars.find(
+                getCalendarToggles().find(
                     calendar =>
-                        calendar.id === savedCalendar.id
+                        calendar.id ===
+                        savedCalendar.id
                 );
 
             if (!currentCalendar) {
@@ -601,7 +472,9 @@
 
             await clickToggle(
                 currentCalendar,
-                Boolean(savedCalendar.checked)
+                Boolean(
+                    savedCalendar.checked
+                )
             );
         }
 
@@ -628,7 +501,7 @@
         alert(
             'I could not find the calendar toggles.\n\n' +
             'Make sure the left Google Calendar sidebar is visible.\n\n' +
-            'If it still fails, open DevTools → Console and run:\n\n' +
+            'If it still fails, open DevTools -> Console and run:\n\n' +
             'GCAL_MINE_ONLY_DEBUG()'
         );
     }
@@ -665,7 +538,9 @@
 
     function updateButton() {
         const button =
-            document.getElementById(BUTTON_ID);
+            document.getElementById(
+                BUTTON_ID
+            );
 
         if (!button) {
             return;
@@ -673,52 +548,63 @@
 
         if (busy) {
             button.disabled = true;
-            button.textContent = 'Working…';
+            button.textContent =
+                'Working...';
             return;
         }
 
         button.disabled = false;
 
-        button.textContent = mineOnlyActive
-            ? 'Restore calendars'
-            : 'Mine only';
+        button.textContent =
+            mineOnlyActive
+                ? 'Restore calendars'
+                : 'Mine only';
 
-        button.title = mineOnlyActive
-            ? 'Restore the calendars that were visible before'
-            : 'Show only your selected calendars';
+        button.title =
+            mineOnlyActive
+                ? 'Restore the calendars that were visible before'
+                : 'Show only your selected calendars';
     }
 
     function createButton() {
         if (
-            document.getElementById(BUTTON_ID)
+            document.getElementById(
+                BUTTON_ID
+            )
         ) {
             return;
         }
 
         const button =
-            document.createElement('button');
+            document.createElement(
+                'button'
+            );
 
         button.id = BUTTON_ID;
         button.type = 'button';
 
-        Object.assign(button.style, {
-            position: 'fixed',
-            left: '16px',
-            bottom: '18px',
-            zIndex: '99999',
-            padding: '8px 13px',
-            border: '1px solid #dadce0',
-            borderRadius: '18px',
-            background: '#fff',
-            color: '#3c4043',
-            fontFamily:
-                'Google Sans, Roboto, Arial, sans-serif',
-            fontSize: '13px',
-            fontWeight: '500',
-            cursor: 'pointer',
-            boxShadow:
-                '0 1px 3px rgba(60,64,67,.3)'
-        });
+        Object.assign(
+            button.style,
+            {
+                position: 'fixed',
+                left: '16px',
+                bottom: '18px',
+                zIndex: '99999',
+                padding: '8px 13px',
+                border:
+                    '1px solid #dadce0',
+                borderRadius: '18px',
+                background: '#fff',
+                color: '#3c4043',
+                fontFamily:
+                    'Google Sans, Roboto, Arial, sans-serif',
+                fontSize: '13px',
+                fontWeight: '500',
+                cursor: 'pointer',
+                boxShadow:
+                    '0 1px 3px rgba(60,64,67,.3)'
+            }
+        );
 
         button.addEventListener(
             'mouseenter',
@@ -733,16 +619,14 @@
         button.addEventListener(
             'mouseleave',
             () => {
-                button.style.background = '#fff';
+                button.style.background =
+                    '#fff';
             }
         );
 
         button.addEventListener(
             'click',
             event => {
-                /*
-                 * Shift-click resets which calendars count as "mine".
-                 */
                 if (event.shiftKey) {
                     event.preventDefault();
                     event.stopPropagation();
@@ -755,68 +639,75 @@
             }
         );
 
-        document.body.appendChild(button);
+        document.body.appendChild(
+            button
+        );
 
         updateButton();
     }
 
-    /**
-     * Debug helper:
-     *
-     *     GCAL_MINE_ONLY_DEBUG()
-     */
-    window.GCAL_MINE_ONLY_DEBUG = function () {
-        const calendars = getCalendarToggles();
+    window.GCAL_MINE_ONLY_DEBUG =
+        function () {
+            const calendars =
+                getCalendarToggles();
 
-        const results = calendars.map(
-            (calendar, index) => ({
-                number: index + 1,
-                id: calendar.id,
-                name: calendar.name,
-                occurrence: calendar.occurrence,
-                displayName:
-                    getDisplayName(calendar, calendars),
-                checked: calendar.checked,
-                ariaLabel:
-                    calendar.element.getAttribute(
-                        'aria-label'
-                    ),
-                role:
-                    calendar.element.getAttribute(
-                        'role'
-                    )
-            })
-        );
+            const results =
+                calendars.map(
+                    (calendar, index) => ({
+                        number:
+                            index + 1,
+                        id:
+                            calendar.id,
+                        name:
+                            calendar.name,
+                        occurrence:
+                            calendar.occurrence,
+                        displayName:
+                            getDisplayName(
+                                calendar,
+                                calendars
+                            ),
+                        checked:
+                            calendar.checked,
+                        ariaLabel:
+                            calendar.element.getAttribute(
+                                'aria-label'
+                            ),
+                        role:
+                            calendar.element.getAttribute(
+                                'role'
+                            )
+                    })
+                );
 
-        console.table(results);
+            console.table(results);
 
-        console.log(
-            '[GCal Mine Only] Selected calendars:',
-            loadPrimaryCalendars()
-        );
+            console.log(
+                '[GCal Mine Only] Selected calendars:',
+                loadPrimaryCalendars()
+            );
 
-        return results;
-    };
+            return results;
+        };
 
-    function initialise() {
-        createButton();
-    }
+    createButton();
 
-    initialise();
-
-    const observer = new MutationObserver(
-        () => {
+    const observer =
+        new MutationObserver(() => {
             if (
                 !document.getElementById(
                     BUTTON_ID
                 )
             ) {
-                initialise();
+                createButton();
             }
-        }
-    );
+        });
 
     observer.observe(
         document.documentElement,
         {
-            child
+            childList: true,
+            subtree: true
+        }
+    );
+})();
