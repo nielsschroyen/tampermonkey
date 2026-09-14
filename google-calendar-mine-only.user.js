@@ -1,12 +1,14 @@
 // ==UserScript==
 // @name         Google Calendar - Mine Only / Restore
 // @namespace    local.gcal.mine-only
-// @version      1.0.0
+// @version      1.1.0
 // @description  Toggle between your own calendar and your previous Google Calendar visibility state.
 // @match        https://calendar.google.com/*
 // @grant        none
 // @run-at       document-idle
+// @license      MIT
 // @homepageURL  https://github.com/nielsschroyen/tampermonkey
+// @supportURL   https://github.com/nielsschroyen/tampermonkey/issues
 // @downloadURL  https://raw.githubusercontent.com/nielsschroyen/tampermonkey/main/google-calendar-mine-only.user.js
 // @updateURL    https://raw.githubusercontent.com/nielsschroyen/tampermonkey/main/google-calendar-mine-only.user.js
 // ==/UserScript==
@@ -19,76 +21,133 @@
     const BUTTON_ID = 'gcal-mine-only-toggle';
 
     let mineOnlyActive = false;
+    let busy = false;
 
     function sleep(ms) {
         return new Promise(resolve => setTimeout(resolve, ms));
     }
 
-    /**
-     * Attempt to find calendar visibility toggles in Google Calendar's sidebar.
-     *
-     * Google Calendar currently exposes these as ARIA checkboxes.
-     * We deliberately avoid relying on Google's generated CSS class names,
-     * because those tend to change.
-     */
-    function getCalendarToggles() {
-        const candidates = [
-            ...document.querySelectorAll('[role="checkbox"][aria-checked]')
-        ];
+    function cleanCalendarName(name) {
+        return (name || '')
+            .replace(/\s+/g, ' ')
+            .replace(/^show\s+/i, '')
+            .replace(/^hide\s+/i, '')
+            .replace(/^toggle\s+/i, '')
+            .replace(/^calendar[:\s-]*/i, '')
+            .replace(/\s+calendar$/i, '')
+            .trim();
+    }
 
-        return candidates
-            .map(el => {
-                const name = getCalendarName(el);
+    function isVisible(element) {
+        const rect = element.getBoundingClientRect();
 
-                return {
-                    element: el,
-                    name,
-                    checked: el.getAttribute('aria-checked') === 'true'
-                };
-            })
-            .filter(item => {
-                if (!item.name) return false;
-
-                // Calendar toggles normally live near the left edge.
-                const rect = item.element.getBoundingClientRect();
-
-                if (rect.width === 0 || rect.height === 0) return false;
-                if (rect.left > 500) return false;
-
-                return true;
-            });
+        return (
+            rect.width > 0 &&
+            rect.height > 0 &&
+            rect.bottom > 0 &&
+            rect.right > 0
+        );
     }
 
     /**
-     * Extract a usable calendar name from the checkbox or its surrounding row.
+     * Return the current checked/active state of a possible calendar toggle.
      */
-    function getCalendarName(checkbox) {
-        // Best case: Google exposes the calendar name through ARIA.
-        const ariaLabel = checkbox.getAttribute('aria-label');
-
-        if (ariaLabel && ariaLabel.trim()) {
-            return cleanCalendarName(ariaLabel);
+    function getCheckedState(element) {
+        if (
+            element instanceof HTMLInputElement &&
+            element.type === 'checkbox'
+        ) {
+            return element.checked;
         }
 
-        // Otherwise inspect nearby containers.
-        let node = checkbox;
+        const ariaChecked = element.getAttribute('aria-checked');
 
-        for (let depth = 0; depth < 5 && node; depth++, node = node.parentElement) {
-            const text = node.innerText?.trim();
+        if (ariaChecked === 'true') return true;
+        if (ariaChecked === 'false') return false;
 
-            if (
-                text &&
-                text.length > 0 &&
-                text.length < 150 &&
-                !text.includes('\n\n')
-            ) {
-                const lines = text
-                    .split('\n')
-                    .map(x => x.trim())
-                    .filter(Boolean);
+        const ariaPressed = element.getAttribute('aria-pressed');
 
-                if (lines.length) {
-                    return cleanCalendarName(lines[lines.length - 1]);
+        if (ariaPressed === 'true') return true;
+        if (ariaPressed === 'false') return false;
+
+        return null;
+    }
+
+    /**
+     * Avoid accidentally interpreting unrelated Google Calendar controls
+     * as calendar names.
+     */
+    function looksLikeCalendarName(text) {
+        if (!text) return false;
+        if (text.length > 120) return false;
+
+        const rejectedNames = new Set([
+            'create',
+            'today',
+            'previous',
+            'next',
+            'search',
+            'settings',
+            'support',
+            'main menu',
+            'google apps',
+            'account',
+            'month',
+            'week',
+            'day',
+            'year',
+            'schedule',
+            'tasks',
+            'keep',
+            'contacts'
+        ]);
+
+        return !rejectedNames.has(text.toLowerCase());
+    }
+
+    /**
+     * Extract a calendar name from the toggle itself or its surrounding row.
+     */
+    function getCalendarName(element) {
+        const directCandidates = [
+            element.getAttribute('aria-label'),
+            element.getAttribute('data-tooltip'),
+            element.getAttribute('title')
+        ];
+
+        for (const candidate of directCandidates) {
+            const name = cleanCalendarName(candidate);
+
+            if (looksLikeCalendarName(name)) {
+                return name;
+            }
+        }
+
+        /*
+         * Google frequently puts the toggle inside a larger row that contains
+         * the actual calendar name, so walk upwards through nearby containers.
+         */
+        let node = element;
+
+        for (let depth = 0; depth < 6 && node; depth++, node = node.parentElement) {
+            const rawText = node.innerText?.trim();
+
+            if (!rawText) {
+                continue;
+            }
+
+            const lines = rawText
+                .split('\n')
+                .map(line => cleanCalendarName(line))
+                .filter(Boolean);
+
+            /*
+             * Prefer individual lines. This prevents an entire sidebar section
+             * from becoming one giant "calendar name".
+             */
+            for (const line of lines) {
+                if (looksLikeCalendarName(line)) {
+                    return line;
                 }
             }
         }
@@ -96,35 +155,78 @@
         return null;
     }
 
-    function cleanCalendarName(name) {
-        return name
-            .replace(/^show\s+/i, '')
-            .replace(/^hide\s+/i, '')
-            .replace(/\s+calendar$/i, '')
-            .trim();
+    /**
+     * Google Calendar has used several different accessible representations
+     * for its visibility controls over time.
+     *
+     * Avoid generated Google CSS classes because they change frequently.
+     */
+    function findToggleCandidates() {
+        const selector = [
+            '[aria-checked]',
+            '[role="checkbox"]',
+            '[role="switch"]',
+            'input[type="checkbox"]',
+            '[aria-pressed]'
+        ].join(',');
+
+        return [...document.querySelectorAll(selector)]
+            .filter(isVisible)
+            .filter(element => {
+                const rect = element.getBoundingClientRect();
+
+                /*
+                 * Calendar visibility controls live in the left sidebar.
+                 * This removes most unrelated controls in the main calendar.
+                 */
+                return rect.left < 500;
+            })
+            .filter(element => getCheckedState(element) !== null);
     }
 
-    function uniqueCalendars(calendars) {
-        const result = [];
-        const seen = new Set();
+    /**
+     * Detect all calendar visibility controls currently present in the sidebar.
+     */
+    function getCalendarToggles() {
+        const candidates = findToggleCandidates();
+        const calendars = [];
+        const seenNames = new Set();
 
-        for (const calendar of calendars) {
-            if (!seen.has(calendar.name)) {
-                seen.add(calendar.name);
-                result.push(calendar);
-            }
+        for (const element of candidates) {
+            const name = getCalendarName(element);
+
+            if (!name) continue;
+            if (seenNames.has(name)) continue;
+
+            seenNames.add(name);
+
+            calendars.push({
+                element,
+                name,
+                checked: getCheckedState(element)
+            });
         }
 
-        return result;
+        return calendars;
     }
 
     async function waitForCalendars(timeout = 10000) {
         const started = Date.now();
 
         while (Date.now() - started < timeout) {
-            const calendars = uniqueCalendars(getCalendarToggles());
+            const calendars = getCalendarToggles();
 
             if (calendars.length > 0) {
+                console.table(
+                    calendars.map(calendar => ({
+                        name: calendar.name,
+                        checked: calendar.checked,
+                        tag: calendar.element.tagName,
+                        role: calendar.element.getAttribute('role'),
+                        ariaLabel: calendar.element.getAttribute('aria-label')
+                    }))
+                );
+
                 return calendars;
             }
 
@@ -134,25 +236,33 @@
         return [];
     }
 
+    /**
+     * Click a calendar toggle only when its state needs to change.
+     */
     async function clickToggle(calendar, targetState) {
-        const currentlyChecked =
-            calendar.element.getAttribute('aria-checked') === 'true';
+        const currentState = getCheckedState(calendar.element);
 
-        if (currentlyChecked === targetState) {
+        if (currentState === targetState) {
             return;
         }
 
-        calendar.element.click();
+        calendar.element.dispatchEvent(
+            new MouseEvent('click', {
+                bubbles: true,
+                cancelable: true,
+                view: window
+            })
+        );
 
-        // Give Google Calendar enough time to update its DOM/state.
-        await sleep(100);
+        /*
+         * Google Calendar may rebuild the sidebar after a visibility change.
+         */
+        await sleep(180);
     }
 
     async function choosePrimaryCalendar(calendars) {
-        const names = calendars.map(c => c.name);
-
-        const numbered = names
-            .map((name, index) => `${index + 1}. ${name}`)
+        const numbered = calendars
+            .map((calendar, index) => `${index + 1}. ${calendar.name}`)
             .join('\n');
 
         const answer = prompt(
@@ -170,13 +280,13 @@
         if (
             Number.isNaN(index) ||
             index < 0 ||
-            index >= names.length
+            index >= calendars.length
         ) {
             alert('Invalid calendar number.');
             return null;
         }
 
-        const selected = names[index];
+        const selected = calendars[index].name;
 
         localStorage.setItem(STORAGE_KEY_PRIMARY, selected);
 
@@ -184,13 +294,10 @@
     }
 
     async function activateMineOnly() {
-        let calendars = uniqueCalendars(await waitForCalendars());
+        const calendars = await waitForCalendars();
 
         if (!calendars.length) {
-            alert(
-                'I could not find the calendar toggles.\n\n' +
-                'Make sure the left Google Calendar sidebar is visible.'
-            );
+            showDetectionError();
             return;
         }
 
@@ -198,7 +305,7 @@
 
         if (
             !primaryName ||
-            !calendars.some(c => c.name === primaryName)
+            !calendars.some(calendar => calendar.name === primaryName)
         ) {
             primaryName = await choosePrimaryCalendar(calendars);
 
@@ -207,11 +314,12 @@
             }
         }
 
-        // Save the complete current visibility state.
+        /*
+         * Save exactly which calendars are currently visible.
+         */
         const previousState = calendars.map(calendar => ({
             name: calendar.name,
-            checked:
-                calendar.element.getAttribute('aria-checked') === 'true'
+            checked: getCheckedState(calendar.element)
         }));
 
         localStorage.setItem(
@@ -219,11 +327,30 @@
             JSON.stringify(previousState)
         );
 
-        // Hide everything except the chosen calendar.
-        for (const calendar of calendars) {
-            const shouldBeVisible = calendar.name === primaryName;
+        /*
+         * Re-read the sidebar before every click.
+         *
+         * Google Calendar may replace DOM nodes after toggling a calendar,
+         * which means keeping the original element references is unreliable.
+         */
+        for (const savedCalendar of previousState) {
+            const currentCalendars = getCalendarToggles();
 
-            await clickToggle(calendar, shouldBeVisible);
+            const currentCalendar = currentCalendars.find(
+                calendar => calendar.name === savedCalendar.name
+            );
+
+            if (!currentCalendar) {
+                continue;
+            }
+
+            const shouldBeVisible =
+                savedCalendar.name === primaryName;
+
+            await clickToggle(
+                currentCalendar,
+                shouldBeVisible
+            );
         }
 
         mineOnlyActive = true;
@@ -247,25 +374,30 @@
             return;
         }
 
-        const calendars = uniqueCalendars(await waitForCalendars());
+        const calendars = await waitForCalendars();
 
         if (!calendars.length) {
-            alert(
-                'I could not find the calendar toggles.\n\n' +
-                'Make sure the left Google Calendar sidebar is visible.'
-            );
+            showDetectionError();
             return;
         }
 
+        /*
+         * Again, re-detect after every click because Calendar can rebuild
+         * the sidebar DOM.
+         */
         for (const savedCalendar of previousState) {
-            const calendar = calendars.find(
-                c => c.name === savedCalendar.name
+            const currentCalendars = getCalendarToggles();
+
+            const currentCalendar = currentCalendars.find(
+                calendar => calendar.name === savedCalendar.name
             );
 
-            if (!calendar) continue;
+            if (!currentCalendar) {
+                continue;
+            }
 
             await clickToggle(
-                calendar,
+                currentCalendar,
                 Boolean(savedCalendar.checked)
             );
         }
@@ -274,13 +406,22 @@
         updateButton();
     }
 
-    async function toggle() {
-        const button = document.getElementById(BUTTON_ID);
+    function showDetectionError() {
+        alert(
+            'I could not find the calendar toggles.\n\n' +
+            'Make sure the left Google Calendar sidebar is visible.\n\n' +
+            'If it still fails, open DevTools → Console and run:\n\n' +
+            'GCAL_MINE_ONLY_DEBUG()'
+        );
+    }
 
-        if (button) {
-            button.disabled = true;
-            button.textContent = 'Working…';
+    async function toggle() {
+        if (busy) {
+            return;
         }
+
+        busy = true;
+        updateButton();
 
         try {
             if (mineOnlyActive) {
@@ -288,11 +429,15 @@
             } else {
                 await activateMineOnly();
             }
-        } finally {
-            if (button) {
-                button.disabled = false;
-            }
+        } catch (error) {
+            console.error('[GCal Mine Only]', error);
 
+            alert(
+                'Google Calendar Mine Only encountered an error.\n\n' +
+                'Check the browser console for details.'
+            );
+        } finally {
+            busy = false;
             updateButton();
         }
     }
@@ -301,6 +446,14 @@
         const button = document.getElementById(BUTTON_ID);
 
         if (!button) return;
+
+        if (busy) {
+            button.disabled = true;
+            button.textContent = 'Working…';
+            return;
+        }
+
+        button.disabled = false;
 
         button.textContent = mineOnlyActive
             ? 'Restore calendars'
@@ -348,32 +501,11 @@
             button.style.background = '#fff';
         });
 
-        button.addEventListener('click', toggle);
-
-        document.body.appendChild(button);
-
-        updateButton();
-    }
-
-    /**
-     * Shift + click the button to forget which calendar was selected as "mine".
-     * The next normal click will ask again.
-     */
-    function addResetHandler() {
-        const button = document.getElementById(BUTTON_ID);
-
-        if (!button || button.dataset.resetHandlerAdded) {
-            return;
-        }
-
-        button.dataset.resetHandlerAdded = 'true';
-
-        button.addEventListener(
-            'click',
-            event => {
-                if (!event.shiftKey) return;
-
-                event.stopImmediatePropagation();
+        button.addEventListener('click', event => {
+            /*
+             * Shift-click forgets the selected primary calendar.
+             */
+            if (event.shiftKey) {
                 event.preventDefault();
 
                 localStorage.removeItem(STORAGE_KEY_PRIMARY);
@@ -385,18 +517,68 @@
                 );
 
                 updateButton();
-            },
-            true
-        );
+                return;
+            }
+
+            toggle();
+        });
+
+        document.body.appendChild(button);
+
+        updateButton();
     }
+
+    /**
+     * Debug helper.
+     *
+     * If calendar detection fails, open the browser console and run:
+     *
+     *     GCAL_MINE_ONLY_DEBUG()
+     *
+     * It prints the left-side controls that the script can see.
+     */
+    window.GCAL_MINE_ONLY_DEBUG = function () {
+        const selector = [
+            '[aria-checked]',
+            '[role="checkbox"]',
+            '[role="switch"]',
+            'input[type="checkbox"]',
+            '[aria-pressed]'
+        ].join(',');
+
+        const results = [...document.querySelectorAll(selector)]
+            .filter(isVisible)
+            .filter(element =>
+                element.getBoundingClientRect().left < 500
+            )
+            .map(element => ({
+                tag: element.tagName,
+                role: element.getAttribute('role'),
+                ariaChecked: element.getAttribute('aria-checked'),
+                ariaPressed: element.getAttribute('aria-pressed'),
+                ariaLabel: element.getAttribute('aria-label'),
+                title: element.getAttribute('title'),
+                detectedName: getCalendarName(element),
+                text: cleanCalendarName(
+                    element.innerText ||
+                    element.parentElement?.innerText ||
+                    ''
+                ).slice(0, 150)
+            }));
+
+        console.table(results);
+
+        return results;
+    };
 
     function initialise() {
         createButton();
-        addResetHandler();
     }
 
-    // Calendar is a single-page app, so run once now and also watch for
-    // Google rebuilding the page.
+    /*
+     * Google Calendar is a single-page application, so run once now and
+     * recreate our button if Google rebuilds the page.
+     */
     initialise();
 
     const observer = new MutationObserver(() => {
