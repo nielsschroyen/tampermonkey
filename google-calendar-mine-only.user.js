@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Google Calendar - Mine Only / Restore
 // @namespace    local.gcal.mine-only
-// @version      1.6.0
+// @version      1.7.0
 // @description  Toggle your own calendars, restore visibility, and dim events from other calendars.
 // @match        https://calendar.google.com/*
 // @grant        none
@@ -19,16 +19,38 @@
     const STORAGE_KEY_PRIMARY = 'gcalMineOnly.primaryCalendarIds';
     const STORAGE_KEY_STATE = 'gcalMineOnly.previousState';
 
+    const TOOLBAR_ID = 'gcal-mine-only-toolbar';
     const BUTTON_ID = 'gcal-mine-only-toggle';
     const DIM_BUTTON_ID = 'gcal-dim-others-toggle';
 
     const DIM_CLASS = 'gcal-mine-only-dimmed';
     const DIM_STYLE_ID = 'gcal-mine-only-dim-style';
 
-    const DIM_OPACITY = 0.5;
+    /*
+     * 0.25 = 25% opacity.
+     */
+    const DIM_OPACITY = 0.25;
+
+    /*
+     * Fixed toolbar position.
+     *
+     * Adjust these two values if you want to move it a few pixels.
+     */
+    const TOOLBAR_TOP = '78px';
+    const TOOLBAR_LEFT = '265px';
 
     let mineOnlyActive = false;
-    let dimOthersActive = false;
+
+    /*
+     * true when the user clicked the Dim button.
+     */
+    let dimLocked = false;
+
+    /*
+     * true while the pointer is over the Dim button.
+     */
+    let dimHovered = false;
+
     let busy = false;
     let dimRefreshTimer = null;
 
@@ -88,10 +110,6 @@
     }
 
     function getCalendarCheckboxes() {
-        /*
-         * This is the actual Google Calendar checkbox markup
-         * observed in the current UI.
-         */
         return [
             ...document.querySelectorAll(
                 'input[type="checkbox"][jsname="YPqjbf"]'
@@ -101,14 +119,15 @@
                 return false;
             }
 
-            const row = element.closest('[data-id]');
-
-            return Boolean(row);
+            return Boolean(
+                element.closest('[data-id]')
+            );
         });
     }
 
     function getCalendarInfo(checkbox) {
-        const row = checkbox.closest('[data-id]');
+        const row =
+            checkbox.closest('[data-id]');
 
         if (!row) {
             return null;
@@ -184,7 +203,7 @@
     }
 
     /* -------------------------------------------------------
-     * PRIMARY / "MINE" CALENDARS
+     * PRIMARY CALENDARS
      * ----------------------------------------------------- */
 
     function loadPrimaryCalendarIds() {
@@ -198,13 +217,12 @@
         }
 
         try {
-            const parsed = JSON.parse(raw);
+            const parsed =
+                JSON.parse(raw);
 
-            if (!Array.isArray(parsed)) {
-                return null;
-            }
-
-            return parsed;
+            return Array.isArray(parsed)
+                ? parsed
+                : null;
         } catch {
             return null;
         }
@@ -220,7 +238,8 @@
     async function choosePrimaryCalendars(
         calendars
     ) {
-        const duplicateCounts = new Map();
+        const duplicateCounts =
+            new Map();
 
         for (const calendar of calendars) {
             duplicateCounts.set(
@@ -233,40 +252,42 @@
             );
         }
 
-        const occurrences = new Map();
+        const occurrences =
+            new Map();
 
-        const numbered = calendars
-            .map((calendar, index) => {
-                const occurrence =
-                    (
-                        occurrences.get(
+        const numbered =
+            calendars
+                .map((calendar, index) => {
+                    const occurrence =
+                        (
+                            occurrences.get(
+                                calendar.name
+                            ) || 0
+                        ) + 1;
+
+                    occurrences.set(
+                        calendar.name,
+                        occurrence
+                    );
+
+                    let displayName =
+                        calendar.name;
+
+                    if (
+                        duplicateCounts.get(
                             calendar.name
-                        ) || 0
-                    ) + 1;
+                        ) > 1
+                    ) {
+                        displayName +=
+                            ` [${occurrence}]`;
+                    }
 
-                occurrences.set(
-                    calendar.name,
-                    occurrence
-                );
-
-                let displayName =
-                    calendar.name;
-
-                if (
-                    duplicateCounts.get(
-                        calendar.name
-                    ) > 1
-                ) {
-                    displayName +=
-                        ` [${occurrence}]`;
-                }
-
-                return (
-                    `${index + 1}. ` +
-                    displayName
-                );
-            })
-            .join('\n');
+                    return (
+                        `${index + 1}. ` +
+                        displayName
+                    );
+                })
+                .join('\n');
 
         const answer = prompt(
             'Which calendars are yours?\n\n' +
@@ -300,8 +321,7 @@
                 index =>
                     Number.isNaN(index) ||
                     index < 0 ||
-                    index >=
-                        calendars.length
+                    index >= calendars.length
             );
 
         if (invalid) {
@@ -314,9 +334,11 @@
             return null;
         }
 
-        const ids = indexes.map(
-            index => calendars[index].id
-        );
+        const ids =
+            indexes.map(
+                index =>
+                    calendars[index].id
+            );
 
         savePrimaryCalendarIds(ids);
 
@@ -329,11 +351,6 @@
         let ids =
             loadPrimaryCalendarIds();
 
-        /*
-         * Previous script versions stored a different identifier
-         * format. If it does not match the real decoded calendar IDs,
-         * automatically run setup again.
-         */
         if (
             !ids ||
             ids.length === 0 ||
@@ -366,13 +383,14 @@
         clearDimmedEvents();
 
         mineOnlyActive = false;
-        dimOthersActive = false;
+        dimLocked = false;
+        dimHovered = false;
 
         updateButtons();
 
         alert(
             'Your selected calendars have been reset.\n\n' +
-            'Click "Mine only" or "Dim others" to choose them again.'
+            'Click "Mine only" or hover "Dim others" to configure them again.'
         );
     }
 
@@ -414,10 +432,6 @@
             const savedCalendar
             of previousState
         ) {
-            /*
-             * Re-read because Google can rebuild the sidebar
-             * after every checkbox change.
-             */
             const current =
                 getCalendars().find(
                     calendar =>
@@ -502,12 +516,6 @@
      * ----------------------------------------------------- */
 
     function getEventElements() {
-        /*
-         * This is the important discovery from the current
-         * Google Calendar DOM:
-         *
-         *     <div data-eventid="...">
-         */
         return [
             ...document.querySelectorAll(
                 '[data-eventid]'
@@ -531,12 +539,9 @@
         }
 
         /*
-         * Observed Google format:
+         * Example:
          *
-         * <event-id>_<date/time> calendar@example.com
-         *
-         * The calendar identifier is the final whitespace-separated
-         * value.
+         * <event-id>_<timestamp> calendar@example.com
          */
         const match =
             decoded.match(/\s(\S+)\s*$/);
@@ -552,6 +557,13 @@
      * DIM OTHERS
      * ----------------------------------------------------- */
 
+    function isDimActive() {
+        return (
+            dimLocked ||
+            dimHovered
+        );
+    }
+
     function ensureDimStyle() {
         if (
             document.getElementById(
@@ -566,15 +578,19 @@
                 'style'
             );
 
-        style.id = DIM_STYLE_ID;
+        style.id =
+            DIM_STYLE_ID;
 
         style.textContent = `
             .${DIM_CLASS} {
                 opacity: ${DIM_OPACITY} !important;
+                transition: opacity 120ms ease;
             }
         `;
 
-        document.head.appendChild(style);
+        document.head.appendChild(
+            style
+        );
     }
 
     function clearDimmedEvents() {
@@ -594,7 +610,6 @@
             await waitForCalendars();
 
         if (!calendars.length) {
-            showDetectionError();
             return false;
         }
 
@@ -614,8 +629,8 @@
             getEventElements();
 
         let identified = 0;
-        let dimmed = 0;
         let mine = 0;
+        let dimmed = 0;
 
         for (
             const eventElement
@@ -627,8 +642,8 @@
                 );
 
             /*
-             * If Google gives us an event we cannot identify,
-             * leave it unchanged rather than incorrectly dimming it.
+             * Unknown event ownership:
+             * leave it untouched.
              */
             if (!calendarId) {
                 continue;
@@ -659,52 +674,71 @@
                     events.length,
                 identified,
                 mine,
-                dimmed
+                dimmed,
+                opacity:
+                    DIM_OPACITY
             }
         );
 
         return true;
     }
 
-    async function toggleDimOthers() {
+    async function refreshDimState() {
+        if (isDimActive()) {
+            await applyDimOthers();
+        } else {
+            clearDimmedEvents();
+        }
+    }
+
+    async function toggleDimLock() {
         if (busy) {
             return;
         }
 
-        busy = true;
+        dimLocked =
+            !dimLocked;
+
+        await refreshDimState();
+
         updateButtons();
+    }
+
+    async function startDimHover() {
+        if (busy) {
+            return;
+        }
+
+        dimHovered = true;
 
         try {
-            if (dimOthersActive) {
-                clearDimmedEvents();
-
-                dimOthersActive = false;
-            } else {
-                const success =
-                    await applyDimOthers();
-
-                if (success) {
-                    dimOthersActive = true;
-                }
-            }
+            await refreshDimState();
         } catch (error) {
             console.error(
-                '[GCal Mine Only]',
+                '[GCal Mine Only] Hover dim failed:',
                 error
             );
-
-            alert(
-                'Could not apply transparency.\n\n' +
-                'Check the browser console for details.'
-            );
-        } finally {
-            busy = false;
-            updateButtons();
         }
+
+        updateButtons();
+    }
+
+    async function endDimHover() {
+        dimHovered = false;
+
+        /*
+         * If the user clicked to lock dimming,
+         * keep the events dimmed.
+         */
+        if (!dimLocked) {
+            clearDimmedEvents();
+        }
+
+        updateButtons();
     }
 
     function scheduleDimRefresh() {
-        if (!dimOthersActive) {
+        if (!isDimActive()) {
             return;
         }
 
@@ -717,8 +751,7 @@
                 applyDimOthers()
                     .catch(error => {
                         console.error(
-                            '[GCal Mine Only] ' +
-                            'Could not refresh dimming:',
+                            '[GCal Mine Only] Could not refresh dimming:',
                             error
                         );
                     });
@@ -750,7 +783,7 @@
                 await activateMineOnly();
             }
 
-            if (dimOthersActive) {
+            if (isDimActive()) {
                 await applyDimOthers();
             }
         } catch (error) {
@@ -764,21 +797,15 @@
         }
     }
 
-    function styleButton(
-        button,
-        bottom
-    ) {
+    function styleButton(button) {
         Object.assign(
             button.style,
             {
-                position: 'fixed',
-                left: '16px',
-                bottom,
-                zIndex: '99999',
-                padding: '8px 13px',
+                height: '32px',
+                padding: '0 12px',
                 border:
                     '1px solid #dadce0',
-                borderRadius: '18px',
+                borderRadius: '16px',
                 background: '#fff',
                 color: '#3c4043',
                 fontFamily:
@@ -787,7 +814,8 @@
                 fontWeight: '500',
                 cursor: 'pointer',
                 boxShadow:
-                    '0 1px 3px rgba(60,64,67,.3)'
+                    '0 1px 2px rgba(60,64,67,.18)',
+                whiteSpace: 'nowrap'
             }
         );
 
@@ -810,7 +838,49 @@
         );
     }
 
+    function createToolbar() {
+        let toolbar =
+            document.getElementById(
+                TOOLBAR_ID
+            );
+
+        if (toolbar) {
+            return toolbar;
+        }
+
+        toolbar =
+            document.createElement(
+                'div'
+            );
+
+        toolbar.id =
+            TOOLBAR_ID;
+
+        Object.assign(
+            toolbar.style,
+            {
+                position: 'fixed',
+                top: TOOLBAR_TOP,
+                left: TOOLBAR_LEFT,
+                zIndex: '99999',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '8px',
+                pointerEvents: 'auto'
+            }
+        );
+
+        document.body.appendChild(
+            toolbar
+        );
+
+        return toolbar;
+    }
+
     function createButtons() {
+        const toolbar =
+            createToolbar();
+
         if (
             !document.getElementById(
                 BUTTON_ID
@@ -824,14 +894,15 @@
             button.id = BUTTON_ID;
             button.type = 'button';
 
-            styleButton(
-                button,
-                '18px'
-            );
+            styleButton(button);
 
             button.addEventListener(
                 'click',
                 event => {
+                    /*
+                     * Shift-click:
+                     * reset chosen personal calendars.
+                     */
                     if (event.shiftKey) {
                         event.preventDefault();
 
@@ -843,7 +914,7 @@
                 }
             );
 
-            document.body.appendChild(
+            toolbar.appendChild(
                 button
             );
         }
@@ -861,19 +932,33 @@
             button.id =
                 DIM_BUTTON_ID;
 
-            button.type = 'button';
+            button.type =
+                'button';
 
-            styleButton(
-                button,
-                '58px'
+            styleButton(button);
+
+            /*
+             * Hover = temporary dim.
+             */
+            button.addEventListener(
+                'mouseenter',
+                startDimHover
             );
 
             button.addEventListener(
-                'click',
-                toggleDimOthers
+                'mouseleave',
+                endDimHover
             );
 
-            document.body.appendChild(
+            /*
+             * Click = lock/unlock dim mode.
+             */
+            button.addEventListener(
+                'click',
+                toggleDimLock
+            );
+
+            toolbar.appendChild(
                 button
             );
         }
@@ -893,7 +978,8 @@
             );
 
         if (mineButton) {
-            mineButton.disabled = busy;
+            mineButton.disabled =
+                busy;
 
             mineButton.textContent =
                 busy
@@ -904,14 +990,21 @@
         }
 
         if (dimButton) {
-            dimButton.disabled = busy;
+            dimButton.disabled =
+                busy;
 
-            dimButton.textContent =
-                busy
-                    ? 'Working...'
-                    : dimOthersActive
-                        ? 'Undim others'
-                        : 'Dim others';
+            if (dimLocked) {
+                dimButton.textContent =
+                    'Undim others';
+            } else {
+                dimButton.textContent =
+                    'Dim others';
+            }
+
+            dimButton.title =
+                dimLocked
+                    ? 'Click to restore other calendars. Hover keeps the preview active.'
+                    : 'Hover to temporarily dim other calendars to 25%. Click to keep them dimmed.';
         }
     }
 
@@ -975,7 +1068,9 @@
 
             return {
                 calendars,
-                events
+                events,
+                dimLocked,
+                dimHovered
             };
         };
 
@@ -990,6 +1085,9 @@
         new MutationObserver(() => {
             if (
                 !document.getElementById(
+                    TOOLBAR_ID
+                ) ||
+                !document.getElementById(
                     BUTTON_ID
                 ) ||
                 !document.getElementById(
@@ -999,10 +1097,6 @@
                 createButtons();
             }
 
-            /*
-             * Google constantly creates/replaces event DOM elements
-             * while navigating and scrolling.
-             */
             scheduleDimRefresh();
         });
 
